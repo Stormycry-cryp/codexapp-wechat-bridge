@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codex.wechat-bridge</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE_PATH__</string>
+    <string>__PROJECT_DIR__/dist/cli.js</string>
+    <string>run</string>
+    <string>--data-dir</string>
+    <string>__DATA_DIR__</string>
+    <string>--cwd</string>
+    <string>__WORKSPACE__</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PROJECT_DIR__</string>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__DATA_DIR__/logs/launchd.out.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__DATA_DIR__/logs/launchd.err.log</string>
+</dict>
+</plist>

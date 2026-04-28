@@ -1,0 +1,271 @@
+# Codex WeChat Bridge
+
+Slim local bridge for personal WeChat iLink messages to `codex app-server`.
+
+Current release: `0.2.8`
+
+## What It Does
+
+This project runs a local daemon that receives personal WeChat messages through the iLink HTTP gateway and forwards them to a local Codex App Server thread.
+
+It is intentionally small:
+
+- One WeChat owner.
+- A whitelist of local projects.
+- One active Codex thread per project.
+- Text-first chat with image input and native image replies.
+- No OpenClaw runtime, plugin host, web admin panel, or Desktop UI automation.
+
+`Codex.app` can coexist with the same persisted threads, but the bridge talks to `codex app-server` directly.
+
+## Features
+
+- QR-code iLink login and token persistence.
+- Long-poll WeChat receive loop with cursor persistence.
+- Thread commands: create, list, resume, stop.
+- Project commands: list and switch between configured local projects.
+- Streaming Codex replies back to WeChat by paragraph or sentence.
+- Approval prompts in WeChat with `1` for approve and `2` for deny.
+- One-time onboarding message when the bridge first has a usable WeChat reply context.
+- Inbound WeChat images:
+  - Download from iLink CDN.
+  - Decrypt AES media payloads.
+  - Save under `~/.codex-wechat-bridge/assets/`.
+  - Send to Codex as `localImage` inputs.
+- Codex image outputs:
+  - Try native WeChat image reply through iLink CDN upload.
+  - Fall back to text URL/path if native upload fails.
+
+## Requirements
+
+- macOS or another Node-capable local machine.
+- Node.js 20+.
+- `Codex.app` installed at `/Applications/Codex.app`, or `codex` available on `PATH`.
+- A valid personal WeChat iLink account token created by the setup flow.
+
+## Install
+
+```bash
+npm install
+npm run build
+```
+
+The build output goes to `dist/`.
+
+## Setup
+
+Run setup once:
+
+```bash
+node dist/cli.js setup --cwd /Users/you/path/to/default-project
+```
+
+The command prints a QR URL or QR payload. Open or scan it with WeChat and confirm the login.
+
+After the bridge has a usable WeChat reply context, it sends a one-time onboarding message explaining the main commands. If this is a fresh setup and no previous context token exists, send any message to the bridge once; that first message provides the reply context and triggers onboarding.
+
+By default, bridge data is stored in:
+
+```text
+~/.codex-wechat-bridge/
+```
+
+Use a different data directory when needed:
+
+```bash
+node dist/cli.js setup --data-dir /path/to/data --cwd /path/to/project
+```
+
+Do not copy another user's `~/.codex-wechat-bridge/account.json`. Each recipient should scan with their own WeChat account.
+
+## Run
+
+Start the bridge in the foreground:
+
+```bash
+node dist/cli.js run --cwd /Users/you/path/to/default-project
+```
+
+Check local config:
+
+```bash
+node dist/cli.js status
+```
+
+In this workstation, the bridge is designed to run under a user LaunchAgent. The LaunchAgent should point at `dist/cli.js run` and use the same data directory.
+
+## LaunchAgent Autostart
+
+On macOS, copy `docs/launchagent.example.plist` to:
+
+```text
+~/Library/LaunchAgents/com.codex.wechat-bridge.plist
+```
+
+Then edit these placeholders:
+
+- `__NODE_PATH__`: output of `which node`.
+- `__PROJECT_DIR__`: the unpacked project directory.
+- `__DATA_DIR__`: usually `/Users/<you>/.codex-wechat-bridge`.
+- `__WORKSPACE__`: default local workspace/project path.
+
+Load it:
+
+```bash
+launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.codex.wechat-bridge.plist
+launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"
+```
+
+Check it:
+
+```bash
+launchctl print "gui/$(id -u)/com.codex.wechat-bridge" | rg "state =|pid =|runs =|last exit code"
+```
+
+## Project Registry
+
+List configured projects:
+
+```bash
+node dist/cli.js project list
+```
+
+Add a project:
+
+```bash
+node dist/cli.js project add misc /Users/you/Documents/misc
+```
+
+In WeChat, switch by index or key:
+
+```text
+项目列表
+项目 2
+项目 misc
+```
+
+The bridge stores one active thread per project, so switching projects restores that project's last active thread when available.
+
+## WeChat Commands
+
+| Command | Meaning |
+| --- | --- |
+| `/help` | Show command help |
+| `/new`, `新线程` | Start a new Codex thread |
+| `/threads`, `/thread`, `线程`, `线程列表` | List recent threads |
+| `/resume <index\|thread_id>` | Resume a thread |
+| `线程 <index\|thread_id>`, `切线程 <index\|thread_id>` | Resume a thread with Chinese alias |
+| `/projects`, `/project`, `项目`, `项目列表` | List configured projects |
+| `/project <index\|key>`, `项目 <index\|key>` | Switch project |
+| `/status` | Show bridge, project, and thread status |
+| `/stop`, `停下`, `停止` | Interrupt the active turn |
+| `/approve`, `1` | Approve a pending Codex request |
+| `/deny`, `2` | Deny a pending Codex request |
+
+Plain text is sent to the active thread in the current project. If no active thread exists, the bridge starts or resumes one automatically.
+
+When Codex is busy or waiting for approval, ordinary text and project switching are rejected instead of queued. Use `/stop` to interrupt.
+
+## Images
+
+Send a WeChat image directly to the bridge. The bridge saves it locally and forwards it to Codex as a `localImage` input.
+
+If Codex produces an image output with either a saved local path or an HTTP(S) URL, the bridge tries to send a native WeChat image message. If iLink CDN upload fails, it replies with the URL/path as text so the output is not lost.
+
+## Local Data
+
+Default data directory:
+
+```text
+~/.codex-wechat-bridge/
+```
+
+Files:
+
+- `account.json`: iLink token and account metadata.
+- `sync_cursor.json`: long-poll cursor.
+- `context_tokens.json`: per-user reply context token.
+- `projects.json`: configured project whitelist.
+- `bridge-state.json`: active project and active thread ids.
+- `config.json`: bridge config.
+- `welcome-state.json`: tracks which owner already received the one-time onboarding message.
+- `assets/YYYY-MM-DD/*`: inbound WeChat images saved for Codex.
+- `logs/bridge.log`: redacted runtime logs.
+
+JSON state files are written with current-user-only permissions where the filesystem supports it. Logs redact bearer tokens, bot tokens, and context tokens.
+
+## Development
+
+Run tests:
+
+```bash
+npm test
+```
+
+Type-check:
+
+```bash
+npm run typecheck
+```
+
+Build:
+
+```bash
+npm run build
+```
+
+Useful source entry points:
+
+- `src/cli.ts`: setup/run/status/project CLI.
+- `src/wechat/transport.ts`: long-poll runner and WeChat message handling.
+- `src/wechat/ilink-api.ts`: iLink HTTP client and CDN media upload/download.
+- `src/session-router.ts`: command parsing, project switching, thread routing.
+- `src/codex/app-server-client.ts`: JSON-line Codex App Server client.
+
+## Packaging
+
+For source distribution, exclude generated and local-only files:
+
+- `dist/`
+- `node_modules/`
+- logs, caches, and OS metadata
+- `~/.codex-wechat-bridge/` runtime data
+
+Build after unpacking with `npm install && npm run build`.
+
+## Handing This To Someone Else
+
+Send them the source zip, not your runtime data. The recipient should:
+
+1. Unzip the project.
+2. Install Node.js 20+ if needed.
+3. Run `npm install && npm run build`.
+4. Run `node dist/cli.js setup --cwd /their/default/workspace`.
+5. Scan the QR code with their own WeChat account.
+6. Add project shortcuts with `node dist/cli.js project add <key> <path>`.
+7. Run the bridge in foreground once with `node dist/cli.js run --cwd /their/default/workspace`.
+8. Send `/status` and `/help` from WeChat to verify the bridge.
+9. Optional: install the LaunchAgent for background/autostart.
+
+Do not include these files when handing it off:
+
+- `~/.codex-wechat-bridge/account.json`
+- `~/.codex-wechat-bridge/context_tokens.json`
+- `~/.codex-wechat-bridge/sync_cursor.json`
+- `~/.codex-wechat-bridge/logs/*`
+- Any personal project paths or downloaded image assets unless intentionally shared.
+
+What they need to know:
+
+- This bridge uses personal WeChat iLink. If iLink token setup stops working, they need a valid iLink setup path; there is no enterprise WeChat fallback.
+- It uses local Codex App Server, so their Codex login and model access must already work locally.
+- The bridge defaults Codex threads to `danger-full-access`. They should only run it on machines and workspaces where they accept that level of local file access.
+- It is single-owner. The first configured/allowed owner is the only WeChat sender that can use it.
+
+## Limits
+
+- Personal WeChat iLink only; enterprise WeChat is not supported.
+- Single owner model; messages from other users are rejected.
+- No implicit queue for messages while Codex is busy.
+- `Codex.app` thread visibility is best-effort. The bridge uses the bundled app-server and deep-links opened threads, but GUI refresh can lag.
+- Native image replies depend on iLink CDN upload compatibility with the current personal WeChat gateway.
