@@ -31,6 +31,7 @@
 - Long-running turns now use a 24-hour idle timeout; activity from Codex events should refresh that timer instead of letting a short absolute wall-clock deadline kill the turn.
 - When a turn goes quiet for a long time, the bridge sends at most one keepalive notice per hour until visible activity resumes or the turn ends.
 - Send failures are retried and oversized chunks are split before/after iLink rejection handling.
+- Outbound WeChat sends for the same user must stay serialized across text, image, and file paths; overlapping sends can trigger iLink `ret=-2` and make later reply content disappear.
 - Final plain-text replies and media text fallbacks should go through the same reliable split/retry path as streamed chunks.
 - If any progress chunk is ultimately undeliverable, `WechatBridgeRunner` now sends a complete final-reply fallback: `流式回传不完整，下面是完整回复：...`.
 - Do not remove that fallback just because some partial chunks already reached WeChat; that is the exact truncation case it prevents.
