@@ -7,6 +7,7 @@ import type { CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage
 import type { BridgeConfig, WechatAccount } from "../config.js";
 import { saveConfig } from "../config.js";
 import type { Logger } from "../logger.js";
+import { helpMessage } from "../session-router.js";
 import type { BridgeStore } from "../storage.js";
 import type { SessionRouter } from "../session-router.js";
 import { IlinkApiClient } from "./ilink-api.js";
@@ -17,8 +18,11 @@ import type { InboundWechatMessage, WechatCdnRef, WechatFileRef } from "./types.
 
 type ContextTokenMap = Record<string, string>;
 type WelcomeState = {
-  sentTo?: Record<string, boolean>;
+  version?: number;
+  sentTo?: Record<string, number | boolean>;
 };
+
+const WELCOME_MESSAGE_VERSION = 2;
 
 export type WechatBridgeRunnerOptions = {
   config: BridgeConfig;
@@ -195,12 +199,13 @@ export class WechatBridgeRunner {
 
   private async maybeSendWelcome(userId: string, contextToken: string): Promise<void> {
     const state = await this.options.store.readJson<WelcomeState>("welcome-state.json", {});
-    if (state.sentTo?.[userId]) return;
+    if (welcomeVersionForUser(state, userId) >= WELCOME_MESSAGE_VERSION) return;
     await this.sendText(userId, contextToken, welcomeMessage());
     await this.options.store.writeJson("welcome-state.json", {
+      version: WELCOME_MESSAGE_VERSION,
       sentTo: {
         ...(state.sentTo ?? {}),
-        [userId]: true
+        [userId]: WELCOME_MESSAGE_VERSION
       }
     });
   }
@@ -356,21 +361,17 @@ export function welcomeMessage(): string {
   return [
     "Codex 微信桥已连接。",
     "",
-    "常用：",
-    "- 直接发文字：发送到当前 Codex 线程",
-    "- 发图片：作为图片输入给 Codex",
-    "- 发文件：保存为本地文件并把路径交给 Codex",
-    "- /new 或 新线程：新建线程",
-    "- /thread 或 线程列表：查看线程序号，随后可直接回复数字切换",
-    "- /resume <序号> 或 线程 <序号>：切换线程",
-    "- 项目列表 / 项目 <序号|key>：查看或切换项目，随后可直接回复数字切换",
-    "- /status：查看状态",
-    "- /steer <内容> 或 引导 <内容>：给当前运行中的任务追加引导",
-    "- /stop / 停下：中断当前任务",
-    "- Codex 要权限时，回复 1 同意，2 拒绝",
+    helpMessage(),
     "",
-    "发送 /help 可随时再看命令。"
+    "发送 /help 可随时再看这份说明。"
   ].join("\n");
+}
+
+function welcomeVersionForUser(state: WelcomeState, userId: string): number {
+  const value = state.sentTo?.[userId];
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (value === true) return 1;
+  return 0;
 }
 
 async function fetchLimitedBytes(url: string, maxBytes: number): Promise<Buffer> {

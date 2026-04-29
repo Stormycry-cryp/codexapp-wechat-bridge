@@ -99,6 +99,16 @@ describe("SessionRouter", () => {
     expect(codex.sendTurn).toHaveBeenCalledWith("thread-1", "stream it", { onDelta, onFileOutput });
   });
 
+  it("includes recent updates in /help", async () => {
+    const router = new SessionRouter(fakeCodex("idle", "thread-1"));
+
+    const output = await router.handleText("/help");
+
+    expect(output).toContain("近期更新");
+    expect(output).toContain("/steer");
+    expect(output).toContain("编号列表");
+  });
+
   it("sends image-only messages to Codex with a default prompt", async () => {
     const codex = {
       status: vi.fn(() => ({ state: "idle", activeThreadId: "thread-1" })),

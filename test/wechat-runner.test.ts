@@ -42,10 +42,58 @@ describe("WechatBridgeRunner onboarding", () => {
       expect(sentTexts[0]).toContain("Codex 微信桥已连接");
       expect(sentTexts[0]).toContain("/help");
       expect(sentTexts[0]).toContain("停下");
+      expect(sentTexts[0]).toContain("近期更新");
+      expect(sentTexts[0]).toContain("/steer <内容>");
       expect(sentTexts.filter((text) => text.includes("Codex 微信桥已连接"))).toHaveLength(1);
       await expect(store.readJson("welcome-state.json")).resolves.toEqual({
+        version: 2,
         sentTo: {
-          "user@im.wechat": true
+          "user@im.wechat": 2
+        }
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-sends the updated help once when a user only has an older welcome version", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-runner-"));
+    try {
+      const sentTexts: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (_url: string, init?: RequestInit) => {
+        const body = JSON.parse(String(init?.body));
+        sentTexts.push(body.msg.item_list[0].text_item.text);
+        return new Response(JSON.stringify({ ret: 0 }));
+      }));
+      const store = new BridgeStore(dir);
+      await store.writeJson("welcome-state.json", {
+        version: 1,
+        sentTo: {
+          "user@im.wechat": 1
+        }
+      });
+      const runner = new WechatBridgeRunner({
+        config: { ...defaultConfig("/work"), ownerUserId: "user@im.wechat", longPollTimeoutMs: 10 },
+        account: { token: "token" },
+        store,
+        router: {
+          handleInput: vi.fn(async () => "status ok")
+        } as never,
+        logger: fakeLogger()
+      });
+      const handleMessage = (runner as unknown as {
+        handleMessage(message: { id: string; userId: string; content: string; contextToken: string }): Promise<void>;
+      }).handleMessage.bind(runner);
+
+      await handleMessage({ id: "3", userId: "user@im.wechat", content: "/status", contextToken: "ctx" });
+      await handleMessage({ id: "4", userId: "user@im.wechat", content: "/status", contextToken: "ctx" });
+
+      expect(sentTexts.filter((text) => text.includes("Codex 微信桥已连接"))).toHaveLength(1);
+      expect(sentTexts[0]).toContain("近期更新");
+      await expect(store.readJson("welcome-state.json")).resolves.toEqual({
+        version: 2,
+        sentTo: {
+          "user@im.wechat": 2
         }
       });
     } finally {
@@ -197,7 +245,7 @@ describe("WechatBridgeRunner onboarding", () => {
       }));
 
       const store = new BridgeStore(dir);
-      await store.writeJson("welcome-state.json", { sentTo: { "user@im.wechat": true } });
+      await store.writeJson("welcome-state.json", { version: 2, sentTo: { "user@im.wechat": 2 } });
       const runner = new WechatBridgeRunner({
         config: { ...defaultConfig("/work"), ownerUserId: "user@im.wechat", longPollTimeoutMs: 10 },
         account: { token: "token" },

@@ -20,6 +20,28 @@ const STEER_COMMANDS = ["/steer", "引导", "/引导"];
 const NEW_THREAD_COMMANDS = new Set(["/new", "新线程", "/新线程"]);
 const STOP_COMMANDS = new Set(["/stop", "停下", "/停下", "停止", "/停止"]);
 
+export function helpMessage(): string {
+  return [
+    "Codex 微信桥帮助",
+    "",
+    "常用命令：",
+    "- /new 或 新线程：新建 Codex 线程",
+    "- /threads、/thread、线程列表：查看最近线程，随后可直接回复数字切换",
+    "- /resume <序号|thread_id>、线程 <序号|thread_id>：切换线程",
+    "- /projects、/project、项目列表：查看项目，随后可直接回复数字切换",
+    "- /project <序号|key>、项目 <序号|key>：切换项目",
+    "- /status：查看 bridge、项目和线程状态",
+    "- /steer <内容>、引导 <内容>：给当前 busy 中的任务追加引导",
+    "- /approve、/deny：处理待审批请求",
+    "- 1 / 2：在审批态下快捷同意 / 拒绝",
+    "- /stop、停下：中断当前任务",
+    "",
+    "近期更新：",
+    "- 新增 /steer <内容> 与 引导 <内容>：只在任务 busy 时向当前 turn 插入额外引导，普通 busy 消息仍会拦截",
+    "- 流式回传更稳：尽量避免过短碎片单独发送，编号列表会尽量按完整条目回传"
+  ].join("\n");
+}
+
 export type SessionRouterHooks = {
   onTurnStart?: () => void | Promise<void>;
   onDelta?: (delta: string) => void | Promise<void>;
@@ -81,20 +103,7 @@ export class SessionRouter {
     if (!trimmed) return "";
 
     if (trimmed === "/help") {
-      return [
-        "Commands:",
-        "/new or 新线程 - start a new Codex thread",
-        "/threads, /thread, or 线程列表 - list recent threads (reply with a number to switch)",
-        "/resume <index|thread_id> or 线程 <index|thread_id> - switch thread",
-        "/projects or 项目列表 - list configured projects (reply with a number to switch)",
-        "/project <index|key> or 项目 <index|key> - switch project",
-        "/status - show bridge status",
-        "/steer <text> or 引导 <内容> - insert guidance into the active busy turn",
-        "/approve - approve pending Codex request",
-        "/deny - deny pending Codex request",
-        "1 / 2 - approve / deny while awaiting approval",
-        "/stop or 停下 - interrupt the active turn"
-      ].join("\n");
+      return helpMessage();
     }
 
     if (trimmed === "/approve") {

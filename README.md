@@ -27,7 +27,7 @@ It is intentionally small:
 - Project commands: list and switch between pinned or auto-discovered local projects.
 - Streaming Codex replies back to WeChat by paragraph, sentence, or intact list item.
 - Approval prompts in WeChat with `1` for approve and `2` for deny.
-- One-time onboarding message when the bridge first has a usable WeChat reply context.
+- Versioned onboarding/help message when the bridge first has a usable WeChat reply context, with one-time re-push after guide updates.
 - Inbound WeChat images:
   - Download from iLink CDN.
   - Decrypt AES media payloads.
@@ -241,7 +241,7 @@ Files:
 - `projects.json`: manual project shortcuts.
 - `bridge-state.json`: active project, per-project active thread ids, and the most recent list context for bare-number switching.
 - `config.json`: bridge config, including optional project discovery roots.
-- `welcome-state.json`: tracks which owner already received the one-time onboarding message.
+- `welcome-state.json`: tracks which onboarding/help guide version each owner has already received.
 - `assets/YYYY-MM-DD/*`: inbound WeChat images saved for Codex.
 - `assets/YYYY-MM-DD/files/*`: inbound WeChat files saved for Codex.
 - `logs/bridge.log`: redacted runtime logs.
