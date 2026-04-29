@@ -25,7 +25,7 @@ It is intentionally small:
 - Long-poll WeChat receive loop with cursor persistence.
 - Thread commands: create, list, resume, stop.
 - Project commands: list and switch between pinned or auto-discovered local projects.
-- Streaming Codex replies back to WeChat by paragraph or sentence.
+- Streaming Codex replies back to WeChat by paragraph, sentence, or intact list item.
 - Approval prompts in WeChat with `1` for approve and `2` for deny.
 - One-time onboarding message when the bridge first has a usable WeChat reply context.
 - Inbound WeChat images:
@@ -49,6 +49,8 @@ It is intentionally small:
 - More reliable streaming:
   - Throttle chunk sends to avoid iLink burst failures.
   - Retry transient send failures.
+  - Avoid tiny paragraph fragments becoming standalone WeChat bubbles mid-reply.
+  - Keep numbered list items together instead of splitting on `1.` / `2.` markers.
   - Split oversized chunks before or after `ret=-2` rejections so replies do not get cut off halfway.
   - If a streamed chunk still cannot be delivered completely after split retries, send the complete final reply as a fallback so partial bubbles do not hide the rest of the answer.
 
@@ -202,6 +204,7 @@ The bridge stores one active thread per project, so switching projects restores 
 | `/projects`, `/project`, `项目`, `项目列表` | List available projects; a follow-up bare number switches project |
 | `/project <index\|key>`, `项目 <index\|key>` | Switch project |
 | `/status` | Show bridge, project, and thread status |
+| `/steer <text>`, `引导 <内容>` | Insert guidance into the active busy turn |
 | `/stop`, `停下`, `停止` | Interrupt the active turn |
 | `/approve`, `1` | Approve a pending Codex request |
 | `/deny`, `2` | Deny a pending Codex request |
@@ -209,6 +212,8 @@ The bridge stores one active thread per project, so switching projects restores 
 Plain text is sent to the active thread in the current project. If no active thread exists, the bridge starts or resumes one automatically.
 
 When Codex is busy or waiting for approval, ordinary text and project switching are rejected instead of queued. Use `/stop` to interrupt.
+
+If Codex is already busy and you want to inject extra guidance into the current running turn, use `/steer <text>` or `引导 <内容>`. This is explicit-only: ordinary text is still rejected while busy.
 
 ## Images And Files
 

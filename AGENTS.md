@@ -6,6 +6,7 @@
 - 实事求是；缺少前置信息时直接说明，不编造，不用类似信息替代。
 - 忠实于事实和用户利益，不一味附和。
 - 当没有给用户选项而用户回复 `1` 时，代表同意。
+- 本项目提交信息默认使用中文，包括提交标题和提交描述；除非用户明确要求英文。
 - 项目级编程任务默认使用 `planning-with-files`，每个线程独立；开始时先检查是否已有记录。计划文件不要放在项目内，放到项目外独立目录。
 - 绝对不要反复 `git pull`；除非用户主动要求对齐 GitLab，否则不要主动拉代码。
 
@@ -25,6 +26,8 @@
 
 ## Streaming Notes
 - Progress streaming sends natural paragraph/sentence chunks and keeps fenced code blocks together.
+- Tiny paragraph fragments should stay buffered until there is enough surrounding text to form a meaningful WeChat bubble.
+- Numbered or bulleted list items should stream as intact chunks; do not treat `1.` / `2.` style list markers as ordinary sentence endings.
 - Send failures are retried and oversized chunks are split before/after iLink rejection handling.
 - If any progress chunk is ultimately undeliverable, `WechatBridgeRunner` now sends a complete final-reply fallback: `流式回传不完整，下面是完整回复：...`.
 - Do not remove that fallback just because some partial chunks already reached WeChat; that is the exact truncation case it prevents.

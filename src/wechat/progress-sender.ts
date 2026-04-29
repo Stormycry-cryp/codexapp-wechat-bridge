@@ -91,14 +91,22 @@ export class ProgressSender {
       return final ? this.takeFallbackChunk() : "";
     }
 
-    const paragraphEnd = findParagraphEnd(this.buffer);
-    if (paragraphEnd > 0) {
-      return this.take(paragraphEnd);
+    for (const boundary of findListBoundaries(this.buffer)) {
+      if (this.shouldTakeBoundary(boundary, final, "list")) {
+        return this.take(boundary);
+      }
     }
 
-    const sentenceEnd = findSentenceEnd(this.buffer);
-    if (sentenceEnd > 0) {
-      return this.take(sentenceEnd);
+    for (const boundary of findParagraphBoundaries(this.buffer)) {
+      if (this.shouldTakeBoundary(boundary, final, "paragraph")) {
+        return this.take(boundary);
+      }
+    }
+
+    for (const boundary of findSentenceBoundaries(this.buffer)) {
+      if (this.shouldTakeBoundary(boundary, final, "sentence")) {
+        return this.take(boundary);
+      }
     }
 
     if (this.buffer.length >= this.maxMessageLength) {
@@ -107,6 +115,12 @@ export class ProgressSender {
 
     if (final) return this.takeFallbackChunk();
     return "";
+  }
+
+  private shouldTakeBoundary(boundary: number, final: boolean, kind: "list" | "paragraph" | "sentence"): boolean {
+    if (boundary <= 0) return false;
+    if (final || kind === "list") return true;
+    return this.buffer.slice(0, boundary).trim().length >= MIN_STREAM_CHUNK_LENGTH;
   }
 
   private takeFallbackChunk(): string {
@@ -228,20 +242,45 @@ export class ProgressSender {
   }
 }
 
-function findParagraphEnd(text: string): number {
-  const match = /\n\s*\n/.exec(text);
-  return match ? match.index : -1;
+const MIN_STREAM_CHUNK_LENGTH = 6;
+
+function findParagraphBoundaries(text: string): number[] {
+  return Array.from(text.matchAll(/\n\s*\n/g), (match) => match.index ?? -1).filter((index) => index > 0);
 }
 
-function findSentenceEnd(text: string): number {
-  const boundary = lastSentenceBoundary(text);
-  if (boundary < 0) return -1;
-  return boundary + 1;
+function findSentenceBoundaries(text: string): number[] {
+  const boundaries: number[] = [];
+  for (const match of text.matchAll(/[。！？!?](?=\s|$)|\.(?=\s|$)/g)) {
+    const index = match.index ?? -1;
+    if (index < 0) continue;
+    if (match[0] === "." && looksLikeListMarker(text, index)) continue;
+    boundaries.push(index + 1);
+  }
+  return boundaries;
+}
+
+function findListBoundaries(text: string): number[] {
+  const starts = Array.from(
+    text.matchAll(/(?:^|\n)[ \t]*(?:[-*•]|\d+[.)])(?:\s+|$)/g),
+    (match) => match.index ?? -1
+  ).filter((index) => index >= 0);
+  return starts.slice(1).filter((index) => index > 0);
 }
 
 function lastSentenceBoundary(text: string): number {
-  const match = /[。！？!?](?=\s|$)|\.(?=\s|$)/.exec(text);
-  return match ? match.index : -1;
+  const boundaries = findSentenceBoundaries(text);
+  if (boundaries.length === 0) return -1;
+  return boundaries[boundaries.length - 1]! - 1;
+}
+
+function looksLikeListMarker(text: string, dotIndex: number): boolean {
+  const lineStart = text.lastIndexOf("\n", dotIndex - 1) + 1;
+  const linePrefix = text.slice(lineStart, dotIndex + 1).trimStart();
+  if (/^\d+[.)]$/.test(linePrefix)) return true;
+
+  const windowStart = Math.max(0, dotIndex - 8);
+  const tail = text.slice(windowStart, dotIndex + 1);
+  return /(?:^|[\s(:：])\d+[.)]$/.test(tail);
 }
 
 function findFirstClosedFenceEnd(text: string): number {

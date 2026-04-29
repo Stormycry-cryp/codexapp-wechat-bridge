@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Improved streamed reply cohesion:
+  - Avoids sending tiny paragraph fragments as standalone WeChat bubbles when the surrounding thought has not arrived yet.
+  - Keeps numbered list items together instead of splitting at `1.` / `2.` list markers.
+
 ## 0.2.10 - 2026-04-29
 
 - Fixed an additional streamed reply truncation case:

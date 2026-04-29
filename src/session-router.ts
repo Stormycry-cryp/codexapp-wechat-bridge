@@ -16,6 +16,7 @@ type BridgeState = {
 const PROJECT_COMMANDS = ["/projects", "/project", "项目", "/项目", "项目列表", "/项目列表"];
 const THREAD_COMMANDS = ["/threads", "/thread", "/thread列表", "线程", "/线程", "线程列表", "/线程列表"];
 const RESUME_COMMANDS = ["/resume", "切线程", "/切线程", "恢复线程", "/恢复线程"];
+const STEER_COMMANDS = ["/steer", "引导", "/引导"];
 const NEW_THREAD_COMMANDS = new Set(["/new", "新线程", "/新线程"]);
 const STOP_COMMANDS = new Set(["/stop", "停下", "/停下", "停止", "/停止"]);
 
@@ -88,6 +89,7 @@ export class SessionRouter {
         "/projects or 项目列表 - list configured projects (reply with a number to switch)",
         "/project <index|key> or 项目 <index|key> - switch project",
         "/status - show bridge status",
+        "/steer <text> or 引导 <内容> - insert guidance into the active busy turn",
         "/approve - approve pending Codex request",
         "/deny - deny pending Codex request",
         "1 / 2 - approve / deny while awaiting approval",
@@ -112,6 +114,11 @@ export class SessionRouter {
           ? await (codex.approvePending?.() ?? "This Codex client does not support approvals.")
           : await (codex.denyPending?.() ?? "This Codex client does not support approvals.");
       }
+    }
+
+    const steerTarget = commandTarget(trimmed, STEER_COMMANDS);
+    if (steerTarget !== null) {
+      return await this.handleSteerCommand(steerTarget);
     }
 
     const recentListTarget = await this.resolveRecentListTarget(trimmed);
@@ -214,6 +221,22 @@ export class SessionRouter {
       return await codex.sendTurn(threadId, text, turnOptions);
     }
     return await codex.sendTurn(threadId, text);
+  }
+
+  private async handleSteerCommand(target: string): Promise<string> {
+    const guidance = target.trim();
+    if (!guidance) {
+      return "Usage: /steer <text>";
+    }
+    const codex = await this.ensureCodexForActiveProject();
+    const status = codex.status();
+    if (status.state !== "busy" || !status.activeThreadId || !status.activeTurnId) {
+      return "No active Codex turn to steer.";
+    }
+    if (!codex.steerTurn) {
+      return "This Codex client does not support steer.";
+    }
+    return await codex.steerTurn(status.activeThreadId, status.activeTurnId, guidance);
   }
 
   private async resolveThreadTarget(target: string): Promise<string> {
