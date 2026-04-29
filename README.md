@@ -51,6 +51,7 @@ It is intentionally small:
 - More reliable streaming:
   - Throttle chunk sends to avoid iLink burst failures.
   - Retry transient send failures.
+  - Serialize text, image, and file sends per WeChat user so streamed progress and native media replies do not overlap and trip iLink `ret=-2`.
   - Treat Codex turn timeout as a long idle timeout instead of a short absolute wall-clock limit; the default idle budget is now 24 hours.
   - Send an hourly keepalive notice when a long-running turn has no new visible progress, so WeChat does not look dead during quiet stretches.
   - Avoid tiny paragraph fragments becoming standalone WeChat bubbles mid-reply.
