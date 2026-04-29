@@ -28,6 +28,9 @@
 - Progress streaming sends natural paragraph/sentence chunks and keeps fenced code blocks together.
 - Tiny paragraph fragments should stay buffered until there is enough surrounding text to form a meaningful WeChat bubble.
 - Numbered or bulleted list items should stream as intact chunks; do not treat `1.` / `2.` style list markers as ordinary sentence endings.
+- Long-running turns now use a 24-hour idle timeout; activity from Codex events should refresh that timer instead of letting a short absolute wall-clock deadline kill the turn.
+- When a turn goes quiet for a long time, the bridge sends at most one keepalive notice per hour until visible activity resumes or the turn ends.
 - Send failures are retried and oversized chunks are split before/after iLink rejection handling.
+- Final plain-text replies and media text fallbacks should go through the same reliable split/retry path as streamed chunks.
 - If any progress chunk is ultimately undeliverable, `WechatBridgeRunner` now sends a complete final-reply fallback: `流式回传不完整，下面是完整回复：...`.
 - Do not remove that fallback just because some partial chunks already reached WeChat; that is the exact truncation case it prevents.

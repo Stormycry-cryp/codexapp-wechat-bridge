@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
+  CodexAppServerClient,
   buildTurnInput,
   buildThreadResumeParams,
   buildThreadStartParams,
@@ -13,6 +14,14 @@ import {
 } from "../src/codex/app-server-client.js";
 
 describe("CodexAppServerClient helpers", () => {
+  it("keeps the default turn idle timeout at least 24 hours", () => {
+    const client = new CodexAppServerClient({ cwd: "/work/project" }) as unknown as {
+      turnIdleTimeoutMs(): number;
+    };
+
+    expect(client.turnIdleTimeoutMs()).toBeGreaterThanOrEqual(24 * 60 * 60 * 1000);
+  });
+
   it("starts and resumes threads with full filesystem access by default", () => {
     expect(buildThreadStartParams("/work/project")).toMatchObject({
       cwd: "/work/project",
