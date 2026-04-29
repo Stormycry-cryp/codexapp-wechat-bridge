@@ -1,8 +1,9 @@
 import { randomBytes } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { extname } from "node:path";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { CodexImageOutput, CodexInputImage } from "../codex/app-server-client.js";
+import type { CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage } from "../codex/app-server-client.js";
 import type { BridgeConfig, WechatAccount } from "../config.js";
 import { saveConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -12,7 +13,7 @@ import { IlinkApiClient } from "./ilink-api.js";
 import { detectImageMime, imageExtensionForMime } from "./media.js";
 import { toInboundWechatMessage } from "./message.js";
 import { ProgressSender } from "./progress-sender.js";
-import type { InboundWechatMessage } from "./types.js";
+import type { InboundWechatMessage, WechatCdnRef, WechatFileRef } from "./types.js";
 
 type ContextTokenMap = Record<string, string>;
 type WelcomeState = {
@@ -25,6 +26,13 @@ export type WechatBridgeRunnerOptions = {
   store: BridgeStore;
   router: SessionRouter;
   logger: Logger;
+};
+
+type InboundAttachmentSaveOptions<TRef extends WechatCdnRef, TOutput> = {
+  kind: "image" | "file";
+  subdir?: string;
+  fileName: (messagePrefix: string, ref: TRef, index: number, bytes: Buffer) => string;
+  toOutput: (target: string, ref: TRef) => TOutput;
 };
 
 export class WechatBridgeRunner {
@@ -111,32 +119,40 @@ export class WechatBridgeRunner {
       messageId: message.id,
       command: commandName(message.content),
       length: message.content.length,
-      imageCount: message.images?.length ?? 0
+      imageCount: message.images?.length ?? 0,
+      fileCount: message.files?.length ?? 0
     });
 
     const progress = this.createProgressSender(message.userId, token);
     const images = await this.saveInboundImages(message);
-    if ((message.images?.length ?? 0) > 0 && images.length === 0 && !message.content.trim()) {
-      await progress.sendNotice("收到图片，但图片下载或解密失败；请重新发送，或补一段文字说明。");
+    const files = await this.saveInboundFiles(message);
+    const inboundAttachmentCount = (message.images?.length ?? 0) + (message.files?.length ?? 0);
+    if (inboundAttachmentCount > 0 && images.length === 0 && files.length === 0 && !message.content.trim()) {
+      await progress.sendNotice("收到附件，但下载或解密失败；请重新发送，或补一段文字说明。");
       return;
     }
-    const isCommand = images.length === 0 && message.content.trim().startsWith("/");
+    const isCommand = images.length === 0 && files.length === 0 && message.content.trim().startsWith("/");
     if (!isCommand) {
       await progress.sendNotice("收到，Codex 开始处理。长任务会分段回传，/stop 可中断。");
     }
 
     let reply: string;
-    let deliveredImageOutput = false;
+    let deliveredNativeOutput = false;
     try {
       reply = await this.options.router.handleInput({
         text: message.content,
-        images
+        images,
+        files
       }, {
         onDelta: (delta) => progress.push(delta),
         onApproval: (request) => progress.sendNotice(request.summary),
         onImageOutput: async (output) => {
           await this.sendImageOutput(message.userId, token, output);
-          deliveredImageOutput = true;
+          deliveredNativeOutput = true;
+        },
+        onFileOutput: async (output) => {
+          await this.sendFileOutput(message.userId, token, output);
+          deliveredNativeOutput = true;
         }
       });
     } catch (error) {
@@ -147,7 +163,7 @@ export class WechatBridgeRunner {
     await progress.flushAll();
     if (progress.hasStreamedOutput()) {
       await progress.sendNotice("Codex 已完成。");
-    } else if (reply && !(deliveredImageOutput && reply === "(Codex completed without text output.)")) {
+    } else if (reply && !(deliveredNativeOutput && reply === "(Codex completed without text output.)")) {
       await this.sendText(message.userId, token, reply);
     }
   }
@@ -198,6 +214,19 @@ export class WechatBridgeRunner {
     }
   }
 
+  private async sendFileOutput(userId: string, contextToken: string, output: CodexFileOutput): Promise<void> {
+    try {
+      const bytes = await readFile(output.path);
+      await this.api.sendFile(userId, fileNameFromPath(output.path), bytes, contextToken, `cwb-file-${randomBytes(6).toString("hex")}`);
+    } catch (error) {
+      await this.options.logger.warn("failed to send native wechat file output", {
+        error: describeError(error),
+        path: output.path
+      });
+      await this.sendText(userId, contextToken, output.fallbackText);
+    }
+  }
+
   private async loadOutputImageBytes(output: CodexImageOutput): Promise<Buffer> {
     if (output.path) {
       return await readFile(output.path);
@@ -209,22 +238,46 @@ export class WechatBridgeRunner {
   }
 
   private async saveInboundImages(message: InboundWechatMessage): Promise<CodexInputImage[]> {
-    const images = message.images ?? [];
-    if (images.length === 0) return [];
-    const date = new Date().toISOString().slice(0, 10);
-    const dir = join(this.options.store.path("assets"), date);
+    return await this.saveInboundAttachments(message, message.images ?? [], {
+      kind: "image",
+      fileName: (messagePrefix, _ref, index, bytes) => {
+        const mime = detectImageMime(bytes);
+        return `${messagePrefix}-${index + 1}${imageExtensionForMime(mime)}`;
+      },
+      toOutput: (target) => ({ path: target })
+    });
+  }
+
+  private async saveInboundFiles(message: InboundWechatMessage): Promise<CodexInputFile[]> {
+    return await this.saveInboundAttachments(message, message.files ?? [], {
+      kind: "file",
+      subdir: "files",
+      fileName: (messagePrefix, ref, index) => `${messagePrefix}-${index + 1}-${safeAttachmentName(ref.fileName, ".bin")}`,
+      toOutput: (target, ref: WechatFileRef) => ({
+        path: target,
+        originalName: ref.fileName
+      })
+    });
+  }
+
+  private async saveInboundAttachments<TRef extends WechatCdnRef, TOutput>(
+    message: InboundWechatMessage,
+    refs: TRef[],
+    options: InboundAttachmentSaveOptions<TRef, TOutput>
+  ): Promise<TOutput[]> {
+    if (refs.length === 0) return [];
+    const dir = inboundAttachmentDir(this.options.store.path("assets"), options.subdir);
+    const messagePrefix = safeFilePart(message.id);
     await mkdir(dir, { recursive: true, mode: 0o700 });
-    const saved: CodexInputImage[] = [];
-    for (const [index, ref] of images.entries()) {
+    const saved: TOutput[] = [];
+    for (const [index, ref] of refs.entries()) {
       try {
         const bytes = await this.api.downloadCdnMedia(ref);
-        const mime = detectImageMime(bytes);
-        const fileName = `${safeFilePart(message.id)}-${index + 1}${imageExtensionForMime(mime)}`;
-        const target = join(dir, fileName);
+        const target = join(dir, options.fileName(messagePrefix, ref, index, bytes));
         await writeFile(target, bytes, { mode: 0o600 });
-        saved.push({ path: target });
+        saved.push(options.toOutput(target, ref));
       } catch (error) {
-        await this.options.logger.warn("failed to save inbound wechat image", {
+        await this.options.logger.warn(`failed to save inbound wechat ${options.kind}`, {
           messageId: message.id,
           index,
           error: describeError(error)
@@ -275,6 +328,25 @@ function safeFilePart(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "_").slice(0, 80) || randomBytes(4).toString("hex");
 }
 
+function inboundAttachmentDir(root: string, subdir?: string): string {
+  const date = new Date().toISOString().slice(0, 10);
+  return subdir ? join(root, date, subdir) : join(root, date);
+}
+
+function safeAttachmentName(fileName: string | undefined, fallbackExt: string): string {
+  const raw = fileName?.trim().split(/[\\/]/).pop() ?? "";
+  const extension = extname(raw).slice(0, 20).replace(/[^a-zA-Z0-9.]+/g, "") || fallbackExt;
+  const base = raw.slice(0, raw.length - extname(raw).length).replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+/, "").slice(0, 80);
+  if (base) return `${base}${extension}`;
+  return `attachment${extension}`;
+}
+
+function fileNameFromPath(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const parts = normalized.split("/");
+  return parts[parts.length - 1] || "artifact.bin";
+}
+
 export function welcomeMessage(): string {
   return [
     "Codex 微信桥已连接。",
@@ -282,6 +354,7 @@ export function welcomeMessage(): string {
     "常用：",
     "- 直接发文字：发送到当前 Codex 线程",
     "- 发图片：作为图片输入给 Codex",
+    "- 发文件：保存为本地文件并把路径交给 Codex",
     "- /new 或 新线程：新建线程",
     "- /thread 或 线程列表：查看线程序号",
     "- /resume <序号> 或 线程 <序号>：切换线程",

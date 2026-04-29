@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv } from "node:crypto";
-import type { WechatImageRef } from "./types.js";
+import type { WechatCdnRef } from "./types.js";
 
 export function encryptWechatCdnPayload(payload: Buffer, aesKey: Buffer): Buffer {
   if (aesKey.length !== 16) {
@@ -10,7 +10,7 @@ export function encryptWechatCdnPayload(payload: Buffer, aesKey: Buffer): Buffer
   return Buffer.concat([cipher.update(payload), cipher.final()]);
 }
 
-export function decryptWechatCdnPayload(payload: Buffer, ref: WechatImageRef): Buffer {
+export function decryptWechatCdnPayload(payload: Buffer, ref: WechatCdnRef): Buffer {
   const key = decodeAesKey(ref);
   const decipher = createDecipheriv("aes-128-ecb", key, null);
   decipher.setAutoPadding(true);
@@ -29,7 +29,7 @@ export function encodeWechatApiAesKey(key: Buffer): string {
   return Buffer.from(key.toString("hex")).toString("base64");
 }
 
-export function decodeAesKey(ref: WechatImageRef): Buffer {
+export function decodeAesKey(ref: WechatCdnRef): Buffer {
   if (ref.aesKeyHex?.trim()) {
     const raw = Buffer.from(ref.aesKeyHex.trim(), "hex");
     if (raw.length === 16) return raw;

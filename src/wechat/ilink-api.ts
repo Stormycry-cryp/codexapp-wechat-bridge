@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { CHANNEL_VERSION } from "../version.js";
-import type { GetUpdatesResponse, IlinkMessageItem, WechatImageRef } from "./types.js";
+import type { GetUpdatesResponse, IlinkMessageItem, WechatCdnRef } from "./types.js";
 import {
   aesEcbPaddedSize,
   decryptWechatCdnPayload,
@@ -71,7 +71,7 @@ export class IlinkApiClient {
     if (bytes.length === 0) {
       throw new Error("cannot send empty image");
     }
-    const upload = await this.uploadImage(bytes, toUserId);
+    const upload = await this.uploadMedia(bytes, toUserId, 1);
     await this.sendMessageItems(toUserId, [{
       type: 2,
       image_item: {
@@ -85,7 +85,27 @@ export class IlinkApiClient {
     }], contextToken, clientId);
   }
 
-  async downloadCdnMedia(ref: WechatImageRef, timeoutMs = 120000): Promise<Buffer> {
+  async sendFile(toUserId: string, fileName: string, bytes: Buffer, contextToken: string, clientId: string): Promise<void> {
+    if (bytes.length === 0) {
+      throw new Error("cannot send empty file");
+    }
+    const upload = await this.uploadMedia(bytes, toUserId, 3);
+    await this.sendMessageItems(toUserId, [{
+      type: 4,
+      file_item: {
+        media: {
+          encrypt_query_param: upload.downloadParam,
+          aes_key: encodeWechatApiAesKey(upload.aesKey),
+          encrypt_type: 1
+        },
+        file_name: fileName,
+        md5: upload.rawMd5,
+        len: String(bytes.length)
+      }
+    }], contextToken, clientId);
+  }
+
+  async downloadCdnMedia(ref: WechatCdnRef, timeoutMs = 120000): Promise<Buffer> {
     const url = new URL(`${this.cdnBaseUrl}/download`);
     url.searchParams.set("encrypted_query_param", ref.encryptedQueryParam);
     const encrypted = await this.fetchBytes(url.toString(), timeoutMs);
@@ -128,16 +148,17 @@ export class IlinkApiClient {
     }
   }
 
-  private async uploadImage(bytes: Buffer, toUserId: string): Promise<{ downloadParam: string; aesKey: Buffer; encryptedSize: number }> {
+  private async uploadMedia(bytes: Buffer, toUserId: string, mediaType: number): Promise<{ downloadParam: string; aesKey: Buffer; encryptedSize: number; rawMd5: string }> {
     const filekey = randomBytes(16).toString("hex");
     const aesKey = randomBytes(16);
     const encryptedSize = aesEcbPaddedSize(bytes.length);
+    const rawMd5 = createHash("md5").update(bytes).digest("hex");
     const upload = await this.postJson<{ upload_param?: string; upload_full_url?: string }>("ilink/bot/getuploadurl", {
       filekey,
-      media_type: 1,
+      media_type: mediaType,
       to_user_id: toUserId,
       rawsize: bytes.length,
-      rawfilemd5: createHash("md5").update(bytes).digest("hex"),
+      rawfilemd5: rawMd5,
       filesize: encryptedSize,
       no_need_thumb: true,
       aeskey: aesKey.toString("hex"),
@@ -145,7 +166,7 @@ export class IlinkApiClient {
     });
     const uploadUrl = upload.upload_full_url?.trim() || this.buildCdnUploadUrl(upload.upload_param?.trim() ?? "", filekey);
     const downloadParam = await this.uploadCdnBytes(uploadUrl, encryptWechatCdnPayload(bytes, aesKey));
-    return { downloadParam, aesKey, encryptedSize };
+    return { downloadParam, aesKey, encryptedSize, rawMd5 };
   }
 
   private buildCdnUploadUrl(uploadParam: string, filekey: string): string {

@@ -15,6 +15,14 @@ export type IlinkImageItem = {
   mid_size?: number;
 };
 
+export type IlinkFileItem = {
+  media?: IlinkCdnMedia;
+  file_name?: string;
+  md5?: string;
+  len?: number | string;
+  aeskey?: string;
+};
+
 export type IlinkRefMessage = {
   title?: string;
   message_item?: IlinkMessageItem;
@@ -24,13 +32,22 @@ export type IlinkMessageItem = {
   type?: number;
   text_item?: IlinkTextItem;
   image_item?: IlinkImageItem;
+  file_item?: IlinkFileItem;
   ref_msg?: IlinkRefMessage;
 };
 
-export type WechatImageRef = {
+export type WechatCdnRef = {
   encryptedQueryParam: string;
   aesKey?: string;
   aesKeyHex?: string;
+};
+
+export type WechatImageRef = WechatCdnRef;
+
+export type WechatFileRef = WechatCdnRef & {
+  fileName?: string;
+  md5?: string;
+  length?: number;
 };
 
 export type IlinkMessage = {
@@ -51,6 +68,7 @@ export type InboundWechatMessage = {
   content: string;
   contextToken: string;
   images?: WechatImageRef[];
+  files?: WechatFileRef[];
 };
 
 export type GetUpdatesResponse = {

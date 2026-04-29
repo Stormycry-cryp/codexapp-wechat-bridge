@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
+import { readdir, stat } from "node:fs/promises";
+import { extname, join } from "node:path";
 import { BRIDGE_VERSION } from "../version.js";
 import { JsonLineRpcClient } from "./json-line-rpc.js";
 
@@ -22,6 +24,7 @@ export type CodexTurnOptions = {
   onDelta?: (delta: string) => void | Promise<void>;
   onApproval?: (request: CodexApprovalRequest) => void | Promise<void>;
   onImageOutput?: (output: CodexImageOutput) => void | Promise<void>;
+  onFileOutput?: (output: CodexFileOutput) => void | Promise<void>;
 };
 
 export type CodexInputImage = {
@@ -29,9 +32,19 @@ export type CodexInputImage = {
   url?: string;
 };
 
+export type CodexInputFile = {
+  path: string;
+  originalName?: string;
+};
+
 export type CodexImageOutput = {
   url?: string;
   path?: string;
+  fallbackText: string;
+};
+
+export type CodexFileOutput = {
+  path: string;
   fallbackText: string;
 };
 
@@ -48,7 +61,7 @@ export interface CodexBridgeClient {
   startThread(): Promise<{ threadId: string }>;
   resumeThread(threadId: string): Promise<{ threadId: string }>;
   listThreads(): Promise<CodexThreadSummary[]>;
-  sendTurn(threadId: string, text: string, options?: CodexTurnOptions, images?: CodexInputImage[]): Promise<string>;
+  sendTurn(threadId: string, text: string, options?: CodexTurnOptions, images?: CodexInputImage[], files?: CodexInputFile[]): Promise<string>;
   approvePending?(): Promise<string>;
   denyPending?(): Promise<string>;
   stop(): Promise<string>;
@@ -76,7 +89,9 @@ export class CodexAppServerClient implements CodexBridgeClient {
   private activeDeltaHandler: CodexTurnOptions["onDelta"] | null = null;
   private activeApprovalHandler: CodexTurnOptions["onApproval"] | null = null;
   private activeImageOutputHandler: CodexTurnOptions["onImageOutput"] | null = null;
+  private activeFileOutputHandler: CodexTurnOptions["onFileOutput"] | null = null;
   private activeOutputChain: Promise<void> = Promise.resolve();
+  private activeWorkspaceSnapshot: WorkspaceArtifactSnapshot = new Map();
   private pendingApproval: PendingApproval | null = null;
 
   constructor(private readonly options: CodexAppServerClientOptions) {}
@@ -140,7 +155,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
     }));
   }
 
-  async sendTurn(threadId: string, text: string, options: CodexTurnOptions = {}, images: CodexInputImage[] = []): Promise<string> {
+  async sendTurn(threadId: string, text: string, options: CodexTurnOptions = {}, images: CodexInputImage[] = [], files: CodexInputFile[] = []): Promise<string> {
     if (this.currentStatus.state === "busy" || this.currentStatus.state === "awaiting_approval") {
       throw new Error("codex is busy");
     }
@@ -148,7 +163,9 @@ export class CodexAppServerClient implements CodexBridgeClient {
     this.activeDeltaHandler = options.onDelta ?? null;
     this.activeApprovalHandler = options.onApproval ?? null;
     this.activeImageOutputHandler = options.onImageOutput ?? null;
+    this.activeFileOutputHandler = options.onFileOutput ?? null;
     this.activeOutputChain = Promise.resolve();
+    this.activeWorkspaceSnapshot = await snapshotWorkspaceArtifacts(this.options.cwd);
     this.activeThreadId = threadId;
     this.currentStatus = { state: "busy", activeThreadId: threadId };
     try {
@@ -157,7 +174,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
         cwd: this.options.cwd,
         approvalPolicy: "on-request",
         approvalsReviewer: "user",
-        input: buildTurnInput(text, images)
+        input: buildTurnInput(text, images, files)
       });
       this.activeTurnId = result.turn.id;
       return await new Promise<string>((resolve, reject) => {
@@ -169,7 +186,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
       });
     } catch (error) {
       this.currentStatus = { state: "idle", activeThreadId: this.activeThreadId || threadId };
-      this.clearActiveTurn();
+      this.resetActiveTurnState();
       throw error;
     }
   }
@@ -261,35 +278,44 @@ export class CodexAppServerClient implements CodexBridgeClient {
   }
 
   private finishTurn(result: string | Error): void {
-    if (this.activeTimer) {
-      clearTimeout(this.activeTimer);
-      this.activeTimer = null;
-    }
     this.currentStatus = result instanceof Error
       ? { state: "idle", activeThreadId: this.activeThreadId || undefined }
       : { state: "idle", activeThreadId: this.activeThreadId };
-    this.activeTurnId = "";
-    const resolve = this.activeWaiter;
-    const reject = this.activeRejecter;
-    const outputChain = this.activeOutputChain;
-    this.activeWaiter = null;
-    this.activeRejecter = null;
-    this.activeDeltaHandler = null;
-    this.activeApprovalHandler = null;
-    this.activeImageOutputHandler = null;
-    this.activeOutputChain = Promise.resolve();
-    this.pendingApproval = null;
+    const { resolve, reject, outputChain, deltaHandler, fileOutputHandler, workspaceSnapshot } = this.releaseActiveTurnState();
     if (result instanceof Error) {
       reject?.(result);
     } else {
-      outputChain.catch(() => undefined).finally(() => {
-        if (this.activeThreadId) this.refreshDesktopThread(this.activeThreadId);
-        resolve?.(result);
-      });
+      void (async () => {
+        let finalReply = result;
+        try {
+          const outputs = await collectGeneratedFileOutputs(this.options.cwd, workspaceSnapshot);
+          await outputChain.catch(() => undefined);
+          await deliverGeneratedFileOutputs(outputs, fileOutputHandler, deltaHandler);
+          finalReply = appendGeneratedOutputsToReply(result, outputs, fileOutputHandler, deltaHandler);
+        } catch {
+          finalReply = result;
+        } finally {
+          if (this.activeThreadId) this.refreshDesktopThread(this.activeThreadId);
+          resolve?.(finalReply);
+        }
+      })();
     }
   }
 
-  private clearActiveTurn(): void {
+  private releaseActiveTurnState(): ReleasedTurnState {
+    const state = {
+      resolve: this.activeWaiter,
+      reject: this.activeRejecter,
+      outputChain: this.activeOutputChain,
+      deltaHandler: this.activeDeltaHandler,
+      fileOutputHandler: this.activeFileOutputHandler,
+      workspaceSnapshot: this.activeWorkspaceSnapshot
+    };
+    this.resetActiveTurnState();
+    return state;
+  }
+
+  private resetActiveTurnState(): void {
     if (this.activeTimer) {
       clearTimeout(this.activeTimer);
       this.activeTimer = null;
@@ -300,7 +326,9 @@ export class CodexAppServerClient implements CodexBridgeClient {
     this.activeDeltaHandler = null;
     this.activeApprovalHandler = null;
     this.activeImageOutputHandler = null;
+    this.activeFileOutputHandler = null;
     this.activeOutputChain = Promise.resolve();
+    this.activeWorkspaceSnapshot = new Map();
     this.pendingApproval = null;
   }
 
@@ -345,8 +373,8 @@ export function buildThreadResumeParams(cwd: string, threadId: string): Record<s
   };
 }
 
-export function buildTurnInput(text: string, images: CodexInputImage[] = []): Array<Record<string, unknown>> {
-  const input: Array<Record<string, unknown>> = [{ type: "text", text, text_elements: [] }];
+export function buildTurnInput(text: string, images: CodexInputImage[] = [], files: CodexInputFile[] = []): Array<Record<string, unknown>> {
+  const input: Array<Record<string, unknown>> = [{ type: "text", text: appendFileContext(text, files), text_elements: [] }];
   for (const image of images) {
     if (image.path) {
       input.push({ type: "localImage", path: image.path });
@@ -355,6 +383,23 @@ export function buildTurnInput(text: string, images: CodexInputImage[] = []): Ar
     }
   }
   return input;
+}
+
+function appendFileContext(text: string, files: CodexInputFile[]): string {
+  if (files.length === 0) return text;
+  const header = text.trim();
+  const lines = files.map((file, index) => {
+    const parts = [file.path];
+    if (file.originalName?.trim()) {
+      parts.push(`原始文件名: ${file.originalName.trim()}`);
+    }
+    return `${index + 1}. ${parts.join(" | ")}`;
+  });
+  return [
+    ...(header ? [header, ""] : []),
+    "附带文件（请直接读取本地路径）:",
+    ...lines
+  ].join("\n");
 }
 
 export function extractImageOutputText(params: unknown): string {
@@ -378,11 +423,31 @@ export function extractImageOutput(params: unknown): CodexImageOutput | null {
   return { ...output, fallbackText: lines.join("\n") };
 }
 
+type WorkspaceArtifactSnapshot = Map<string, WorkspaceArtifactMeta>;
+type WorkspaceArtifactMeta = {
+  mtimeMs: number;
+  size: number;
+};
+
+export const detectGeneratedFileOutputs = {
+  snapshot: snapshotWorkspaceArtifacts,
+  collect: collectGeneratedFileOutputs
+};
+
 type PendingApproval = {
   id: number | string;
   method: string;
   params: unknown;
   request: CodexApprovalRequest;
+};
+
+type ReleasedTurnState = {
+  resolve: ((text: string) => void) | null;
+  reject: ((error: Error) => void) | null;
+  outputChain: Promise<void>;
+  deltaHandler: CodexTurnOptions["onDelta"] | null;
+  fileOutputHandler: CodexTurnOptions["onFileOutput"] | null;
+  workspaceSnapshot: WorkspaceArtifactSnapshot;
 };
 
 function defaultCodexCommand(): string {
@@ -466,4 +531,95 @@ function permissionText(record: Record<string, unknown>): string {
 
 function truncate(text: string, maxLength: number): string {
   return text.length <= maxLength ? text : `${text.slice(0, maxLength - 1)}…`;
+}
+
+const GENERATED_FILE_EXTENSIONS = new Set([
+  ".csv",
+  ".doc",
+  ".docx",
+  ".html",
+  ".md",
+  ".pdf",
+  ".ppt",
+  ".pptx",
+  ".tsv",
+  ".txt",
+  ".xls",
+  ".xlsx",
+  ".zip"
+]);
+const IGNORED_OUTPUT_DIRS = new Set([".git", ".next", ".turbo", "build", "coverage", "dist", "node_modules"]);
+const MAX_GENERATED_FILE_BYTES = 20 * 1024 * 1024;
+const MAX_GENERATED_FILE_OUTPUTS = 5;
+
+async function deliverGeneratedFileOutputs(
+  outputs: CodexFileOutput[],
+  onFileOutput: CodexTurnOptions["onFileOutput"] | null,
+  onDelta: CodexTurnOptions["onDelta"] | null
+): Promise<void> {
+  for (const output of outputs) {
+    if (onFileOutput) {
+      try {
+        await onFileOutput(output);
+        continue;
+      } catch {}
+    }
+    await onDelta?.(`\n\n${output.fallbackText}`);
+  }
+}
+
+function appendGeneratedOutputsToReply(
+  reply: string,
+  outputs: CodexFileOutput[],
+  onFileOutput: CodexTurnOptions["onFileOutput"] | null,
+  onDelta: CodexTurnOptions["onDelta"] | null
+): string {
+  if (outputs.length === 0 || onFileOutput || onDelta) return reply;
+  const suffix = outputs.map((output) => output.fallbackText).join("\n");
+  return reply.trim() ? `${reply}\n\n${suffix}` : suffix;
+}
+
+async function snapshotWorkspaceArtifacts(cwd: string): Promise<WorkspaceArtifactSnapshot> {
+  const files = new Map<string, WorkspaceArtifactMeta>();
+  const pending = [cwd];
+  while (pending.length > 0) {
+    const dir = pending.pop()!;
+    let entries;
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (entry.name === "." || entry.name === "..") continue;
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (!IGNORED_OUTPUT_DIRS.has(entry.name)) {
+          pending.push(fullPath);
+        }
+        continue;
+      }
+      if (!entry.isFile() || !GENERATED_FILE_EXTENSIONS.has(extname(fullPath).toLowerCase())) continue;
+      try {
+        const info = await stat(fullPath);
+        if (info.size <= 0 || info.size > MAX_GENERATED_FILE_BYTES) continue;
+        files.set(fullPath, { mtimeMs: info.mtimeMs, size: info.size });
+      } catch {
+        continue;
+      }
+    }
+  }
+  return files;
+}
+
+async function collectGeneratedFileOutputs(cwd: string, before: WorkspaceArtifactSnapshot): Promise<CodexFileOutput[]> {
+  const after = await snapshotWorkspaceArtifacts(cwd);
+  return Array.from(after.entries())
+    .filter(([path]) => !before.has(path))
+    .sort((left, right) => left[1].mtimeMs - right[1].mtimeMs || left[0].localeCompare(right[0]))
+    .slice(0, MAX_GENERATED_FILE_OUTPUTS)
+    .map(([path]) => ({
+      path,
+      fallbackText: `文件已生成: ${path}`
+    }));
 }

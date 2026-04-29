@@ -1,8 +1,12 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildTurnInput,
   buildThreadResumeParams,
   buildThreadStartParams,
+  detectGeneratedFileOutputs,
   extractImageOutput,
   extractImageOutputText,
   formatApprovalRequest
@@ -54,6 +58,25 @@ describe("CodexAppServerClient helpers", () => {
     ]);
   });
 
+  it("embeds local file paths into the text input for turn/start", () => {
+    expect(buildTurnInput(
+      "请总结",
+      [],
+      [{ path: "/tmp/spec.pdf", originalName: "产品方案.pdf" }]
+    )).toEqual([
+      {
+        type: "text",
+        text: [
+          "请总结",
+          "",
+          "附带文件（请直接读取本地路径）:",
+          "1. /tmp/spec.pdf | 原始文件名: 产品方案.pdf"
+        ].join("\n"),
+        text_elements: []
+      }
+    ]);
+  });
+
   it("renders image generation outputs as WeChat-friendly text", () => {
     const params = {
       item: {
@@ -70,5 +93,27 @@ describe("CodexAppServerClient helpers", () => {
       fallbackText: "图片 URL: https://example.com/image.png\n图片已保存: /tmp/image.png"
     });
     expect(extractImageOutputText(params)).toBe("图片 URL: https://example.com/image.png\n图片已保存: /tmp/image.png");
+  });
+
+  it("detects newly generated workspace artifacts and ignores source edits", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-output-"));
+    try {
+      await writeFile(join(dir, "existing.md"), "already here");
+      const before = await detectGeneratedFileOutputs.snapshot(dir);
+
+      await writeFile(join(dir, "report.pdf"), "pdf output");
+      await writeFile(join(dir, "notes.md"), "markdown output");
+      await writeFile(join(dir, "src.ts"), "source edit");
+
+      const outputs = await detectGeneratedFileOutputs.collect(dir, before);
+
+      expect(outputs.map((output) => output.path.replace(`${dir}/`, "")).sort()).toEqual([
+        "notes.md",
+        "report.pdf"
+      ]);
+      expect(outputs.every((output) => output.fallbackText.includes("文件已生成"))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

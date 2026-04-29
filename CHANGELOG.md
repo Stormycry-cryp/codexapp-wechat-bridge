@@ -1,5 +1,24 @@
 # Changelog
 
+## Unreleased
+
+- Added inbound WeChat file support:
+  - Parses `file_item` media references from iLink updates.
+  - Downloads and decrypts file bytes from WeChat CDN.
+  - Saves files under `~/.codex-wechat-bridge/assets/YYYY-MM-DD/files/`.
+  - Forwards saved local file paths to Codex in the turn text so Codex can read the files directly.
+- Added outbound WeChat file replies for generated workspace artifacts:
+  - Detects newly created document-like files after a Codex turn completes.
+  - Uploads those files through iLink CDN with `media_type=3`.
+  - Sends native WeChat `file_item` replies, with text fallback if upload fails.
+- Fixed streamed reply truncation more defensively:
+  - Retries transient send failures instead of silently dropping chunks.
+  - Adds a minimum send interval to reduce iLink burst failures.
+  - Splits oversized chunks proactively and also after `ret=-2` rejections.
+- Maintenance:
+  - Updated the setup banner and README to mention file support.
+  - Fixed the local dev dependency range for `@types/node` so `npm install` works with currently available registry versions.
+
 ## 0.2.8 - 2026-04-28
 
 - Added a one-time WeChat onboarding message:

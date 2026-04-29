@@ -40,11 +40,13 @@ describe("SessionRouter", () => {
   it("calls turn start and delta hooks for ordinary text", async () => {
     const onTurnStart = vi.fn();
     const onDelta = vi.fn();
+    const onFileOutput = vi.fn();
     const codex = {
       status: vi.fn(() => ({ state: "idle", activeThreadId: "thread-1" })),
       startThread: vi.fn(),
-      sendTurn: vi.fn(async (_threadId: string, _text: string, options?: { onDelta?: (delta: string) => void }) => {
+      sendTurn: vi.fn(async (_threadId: string, _text: string, options?: { onDelta?: (delta: string) => void; onFileOutput?: (output: { path: string }) => void }) => {
         options?.onDelta?.("partial");
+        await options?.onFileOutput?.({ path: "/tmp/report.pdf" });
         return "partial";
       }),
       listThreads: vi.fn(),
@@ -53,10 +55,11 @@ describe("SessionRouter", () => {
     };
     const router = new SessionRouter(codex);
 
-    await expect(router.handleText("stream it", { onTurnStart, onDelta })).resolves.toBe("partial");
+    await expect(router.handleText("stream it", { onTurnStart, onDelta, onFileOutput })).resolves.toBe("partial");
     expect(onTurnStart).toHaveBeenCalledTimes(1);
     expect(onDelta).toHaveBeenCalledWith("partial");
-    expect(codex.sendTurn).toHaveBeenCalledWith("thread-1", "stream it", { onDelta });
+    expect(onFileOutput).toHaveBeenCalledWith({ path: "/tmp/report.pdf" });
+    expect(codex.sendTurn).toHaveBeenCalledWith("thread-1", "stream it", { onDelta, onFileOutput });
   });
 
   it("sends image-only messages to Codex with a default prompt", async () => {
@@ -79,6 +82,30 @@ describe("SessionRouter", () => {
       "请分析这张图片。",
       undefined,
       [{ path: "/tmp/wechat-image.png" }]
+    );
+  });
+
+  it("sends file-only messages to Codex with a default prompt", async () => {
+    const codex = {
+      status: vi.fn(() => ({ state: "idle", activeThreadId: "thread-1" })),
+      startThread: vi.fn(),
+      sendTurn: vi.fn(async () => "done"),
+      listThreads: vi.fn(),
+      resumeThread: vi.fn(),
+      stop: vi.fn()
+    };
+    const router = new SessionRouter(codex);
+
+    await expect(router.handleInput({
+      text: "",
+      files: [{ path: "/tmp/wechat-spec.pdf", originalName: "spec.pdf" }]
+    })).resolves.toBe("done");
+    expect(codex.sendTurn).toHaveBeenCalledWith(
+      "thread-1",
+      "请查看我附带的文件。",
+      undefined,
+      [],
+      [{ path: "/tmp/wechat-spec.pdf", originalName: "spec.pdf" }]
     );
   });
 
