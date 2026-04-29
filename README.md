@@ -1,5 +1,7 @@
 # Codex WeChat Bridge
 
+[中文说明](./README.zh-CN.md)
+
 Slim local bridge for personal WeChat iLink messages to `codex app-server`.
 
 Current release: `0.2.10`
