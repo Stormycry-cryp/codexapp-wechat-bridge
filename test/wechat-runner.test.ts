@@ -232,6 +232,86 @@ describe("WechatBridgeRunner onboarding", () => {
     }
   });
 
+  it("serializes streamed text and native file sends for the same WeChat context", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-runner-"));
+    try {
+      let sendMessageInFlight = false;
+      const sentTypes: number[] = [];
+      const sentTexts: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "https://ilinkai.weixin.qq.com/ilink/bot/getuploadurl") {
+          return new Response(JSON.stringify({ upload_param: "upload-file-param" }));
+        }
+        if (url.startsWith("https://novac2c.cdn.weixin.qq.com/c2c/upload?encrypted_query_param=upload-file-param&filekey=")) {
+          return new Response("", { headers: { "x-encrypted-param": "download-file-param" } });
+        }
+        if (url === "https://ilinkai.weixin.qq.com/ilink/bot/sendmessage") {
+          if (sendMessageInFlight) {
+            return new Response(JSON.stringify({ ret: -2, errcode: 0, errmsg: "overlap" }));
+          }
+          sendMessageInFlight = true;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          sendMessageInFlight = false;
+          const body = JSON.parse(String(init?.body));
+          const item = body.msg.item_list[0];
+          sentTypes.push(Number(item.type));
+          if (Number(item.type) === 1) {
+            sentTexts.push(item.text_item.text);
+          }
+          return new Response(JSON.stringify({ ret: 0 }));
+        }
+        throw new Error(`unexpected url: ${url} ${String(init?.method ?? "GET")}`);
+      }));
+
+      const artifactPath = join(dir, "report.txt");
+      await writeFile(artifactPath, "artifact body");
+      const store = new BridgeStore(dir);
+      await store.writeJson("welcome-state.json", { version: 2, sentTo: { "user@im.wechat": 2 } });
+      const runner = new WechatBridgeRunner({
+        config: { ...defaultConfig("/work"), ownerUserId: "user@im.wechat", longPollTimeoutMs: 10 },
+        account: { token: "token" },
+        store,
+        router: {
+          handleInput: vi.fn(async (_input, hooks?: {
+            onDelta?: (delta: string) => void;
+            onFileOutput?: (output: { path: string; fallbackText: string }) => Promise<void>;
+          }) => {
+            hooks?.onDelta?.("第一段说明。");
+            await hooks?.onFileOutput?.({ path: artifactPath, fallbackText: `文件已生成: ${artifactPath}` });
+            hooks?.onDelta?.("第二段补充。");
+            return "(Codex completed without text output.)";
+          })
+        } as never,
+        logger: fakeLogger()
+      });
+      vi.spyOn(runner as unknown as {
+        createProgressSender(userId: string, contextToken: string): ProgressSender;
+      }, "createProgressSender").mockImplementation((userId, contextToken) => new ProgressSender({
+        send: async (text) => {
+          await (runner as unknown as {
+            sendText(userId: string, contextToken: string, text: string): Promise<void>;
+          }).sendText(userId, contextToken, text);
+        },
+        logger: fakeLogger(),
+        minSendIntervalMs: 0,
+        retryDelaysMs: [],
+        sleep: async () => {}
+      }));
+
+      const handleMessage = (runner as unknown as {
+        handleMessage(message: { id: string; userId: string; content: string; contextToken: string }): Promise<void>;
+      }).handleMessage.bind(runner);
+
+      await handleMessage({ id: "10b", userId: "user@im.wechat", content: "做个 txt", contextToken: "ctx" });
+
+      expect(sentTypes.filter((type) => type === 4)).toHaveLength(1);
+      expect(sentTexts).toContain("第一段说明。");
+      expect(sentTexts).toContain("第二段补充。");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("falls back to the complete final reply when streaming split retries only deliver partial text", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cwb-runner-"));
     try {

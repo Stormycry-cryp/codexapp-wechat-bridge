@@ -45,6 +45,7 @@ export class WechatBridgeRunner {
   private stopping = false;
   private readonly api: IlinkApiClient;
   private readonly seen = new Map<string, number>();
+  private readonly outboundQueues = new Map<string, Promise<void>>();
 
   constructor(private readonly options: WechatBridgeRunnerOptions) {
     this.api = new IlinkApiClient({
@@ -198,7 +199,9 @@ export class WechatBridgeRunner {
   }
 
   private async sendText(userId: string, contextToken: string, text: string): Promise<void> {
-    await this.api.sendText(userId, text, contextToken, `cwb-${randomBytes(6).toString("hex")}`);
+    await this.enqueueOutbound(userId, async () => {
+      await this.api.sendText(userId, text, contextToken, `cwb-${randomBytes(6).toString("hex")}`);
+    });
   }
 
   private async sendTextReliably(userId: string, contextToken: string, text: string): Promise<void> {
@@ -235,7 +238,7 @@ export class WechatBridgeRunner {
   private async sendImageOutput(userId: string, contextToken: string, output: CodexImageOutput): Promise<void> {
     try {
       const bytes = await this.loadOutputImageBytes(output);
-      await this.api.sendImage(userId, bytes, contextToken, `cwb-img-${randomBytes(6).toString("hex")}`);
+      await this.sendImage(userId, contextToken, bytes);
     } catch (error) {
       await this.options.logger.warn("failed to send native wechat image output", {
         error: describeError(error),
@@ -249,7 +252,7 @@ export class WechatBridgeRunner {
   private async sendFileOutput(userId: string, contextToken: string, output: CodexFileOutput): Promise<void> {
     try {
       const bytes = await readFile(output.path);
-      await this.api.sendFile(userId, fileNameFromPath(output.path), bytes, contextToken, `cwb-file-${randomBytes(6).toString("hex")}`);
+      await this.sendFile(userId, contextToken, fileNameFromPath(output.path), bytes);
     } catch (error) {
       await this.options.logger.warn("failed to send native wechat file output", {
         error: describeError(error),
@@ -303,6 +306,31 @@ export class WechatBridgeRunner {
       return await fetchLimitedBytes(output.url, 25 * 1024 * 1024);
     }
     throw new Error("image output has neither path nor url");
+  }
+
+  private async sendImage(userId: string, contextToken: string, bytes: Buffer): Promise<void> {
+    await this.enqueueOutbound(userId, async () => {
+      await this.api.sendImage(userId, bytes, contextToken, `cwb-img-${randomBytes(6).toString("hex")}`);
+    });
+  }
+
+  private async sendFile(userId: string, contextToken: string, fileName: string, bytes: Buffer): Promise<void> {
+    await this.enqueueOutbound(userId, async () => {
+      await this.api.sendFile(userId, fileName, bytes, contextToken, `cwb-file-${randomBytes(6).toString("hex")}`);
+    });
+  }
+
+  private async enqueueOutbound(userId: string, send: () => Promise<void>): Promise<void> {
+    const previous = this.outboundQueues.get(userId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(send);
+    this.outboundQueues.set(userId, next);
+    try {
+      await next;
+    } finally {
+      if (this.outboundQueues.get(userId) === next) {
+        this.outboundQueues.delete(userId);
+      }
+    }
   }
 
   private async saveInboundImages(message: InboundWechatMessage): Promise<CodexInputImage[]> {
