@@ -161,9 +161,14 @@ export class WechatBridgeRunner {
     }
 
     await progress.flushAll();
+    let sentIncompleteFallback = false;
+    if (progress.hasDeliveryFailure() && reply) {
+      await progress.sendNotice(`流式回传不完整，下面是完整回复：\n\n${reply}`);
+      sentIncompleteFallback = true;
+    }
     if (progress.hasStreamedOutput()) {
       await progress.sendNotice("Codex 已完成。");
-    } else if (reply && !(deliveredNativeOutput && reply === "(Codex completed without text output.)")) {
+    } else if (reply && !sentIncompleteFallback && !(deliveredNativeOutput && reply === "(Codex completed without text output.)")) {
       await this.sendText(message.userId, token, reply);
     }
   }
