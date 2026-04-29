@@ -1,4 +1,5 @@
 import type { CodexApprovalRequest, CodexBridgeClient, CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage, CodexTurnOptions } from "./codex/app-server-client.js";
+import type { ProjectDiscoveryConfig } from "./config.js";
 import { ProjectRegistry, formatProjectLine, type BridgeProject } from "./projects.js";
 import type { BridgeStore } from "./storage.js";
 
@@ -6,6 +7,10 @@ type BridgeState = {
   activeThreadId?: string;
   activeProjectKey?: string;
   activeThreadByProject?: Record<string, string>;
+  recentListContext?: {
+    kind: "project" | "thread";
+    entries: string[];
+  };
 };
 
 const PROJECT_COMMANDS = ["/projects", "/project", "项目", "/项目", "项目列表", "/项目列表"];
@@ -25,6 +30,7 @@ export type SessionRouterHooks = {
 export type SessionRouterOptions = {
   workspace?: string;
   codexFactory?: (project: BridgeProject) => CodexBridgeClient;
+  projectDiscovery?: ProjectDiscoveryConfig;
 };
 
 export type SessionRouterInput = {
@@ -37,12 +43,15 @@ export class SessionRouter {
   private codex: CodexBridgeClient;
   private readonly workspace: string;
   private readonly codexFactory?: (project: BridgeProject) => CodexBridgeClient;
+  private readonly projectDiscovery?: ProjectDiscoveryConfig;
   private activeProjectKey = "";
+  private recentListContext?: BridgeState["recentListContext"];
 
   constructor(codex: CodexBridgeClient, private readonly store?: BridgeStore, options: SessionRouterOptions = {}) {
     this.codex = codex;
     this.workspace = options.workspace ?? process.cwd();
     this.codexFactory = options.codexFactory;
+    this.projectDiscovery = options.projectDiscovery;
   }
 
   shutdown(): void {
@@ -74,9 +83,9 @@ export class SessionRouter {
       return [
         "Commands:",
         "/new or 新线程 - start a new Codex thread",
-        "/threads, /thread, or 线程列表 - list recent threads",
+        "/threads, /thread, or 线程列表 - list recent threads (reply with a number to switch)",
         "/resume <index|thread_id> or 线程 <index|thread_id> - switch thread",
-        "/projects or 项目列表 - list configured projects",
+        "/projects or 项目列表 - list configured projects (reply with a number to switch)",
         "/project <index|key> or 项目 <index|key> - switch project",
         "/status - show bridge status",
         "/approve - approve pending Codex request",
@@ -105,9 +114,20 @@ export class SessionRouter {
       }
     }
 
+    const recentListTarget = await this.resolveRecentListTarget(trimmed);
+    if (recentListTarget) {
+      return recentListTarget.kind === "project"
+        ? await this.switchProjectByTarget(recentListTarget.target)
+        : await this.resumeThreadByTarget(recentListTarget.target);
+    }
+
     const projectTarget = commandTarget(trimmed, PROJECT_COMMANDS);
     if (projectTarget !== null && !projectTarget) {
       const { projects, activeProject } = await this.loadProjectState();
+      await this.saveRecentListContext({
+        kind: "project",
+        entries: projects.map((project) => project.key)
+      });
       return [
         `Current project: ${activeProject.key}`,
         ...projects.map((project, index) => formatProjectLine(index, project, project.key === activeProject.key))
@@ -115,15 +135,7 @@ export class SessionRouter {
     }
 
     if (projectTarget) {
-      const codex = await this.ensureCodexForActiveProject();
-      const status = codex.status();
-      if (status.state === "busy" || status.state === "awaiting_approval") {
-        return "Codex is busy. Send /stop to interrupt, or wait and switch project later.";
-      }
-      const project = await this.registry().resolveTarget(projectTarget);
-      await this.switchProject(project);
-      const activeThreadId = await this.loadActiveThreadId();
-      return `Switched project: ${project.key}\nPath: ${project.path}\nThread: ${activeThreadId ? shortThreadId(activeThreadId) : "(none)"}`;
+      return await this.switchProjectByTarget(projectTarget);
     }
 
     if (trimmed === "/status") {
@@ -149,6 +161,10 @@ export class SessionRouter {
       const codex = await this.ensureCodexForActiveProject();
       const threads = await codex.listThreads();
       if (threads.length === 0) return "No recent Codex threads.";
+      await this.saveRecentListContext({
+        kind: "thread",
+        entries: threads.map((thread) => thread.id)
+      });
       const activeThreadId = codex.status().activeThreadId ?? (await this.loadActiveThreadId());
       return [
         `Current: ${activeThreadId ? shortThreadId(activeThreadId) : "(none)"}`,
@@ -158,13 +174,7 @@ export class SessionRouter {
 
     const resumeTarget = commandTarget(trimmed, RESUME_COMMANDS) ?? threadTarget;
     if (resumeTarget) {
-      const target = resumeTarget;
-      if (!target) return "Usage: /resume <index|thread_id>";
-      const threadIdToResume = await this.resolveThreadTarget(target);
-      const codex = await this.ensureCodexForActiveProject();
-      const { threadId } = await codex.resumeThread(threadIdToResume);
-      await this.saveActiveThreadId(threadId);
-      return `Resumed Codex thread: ${threadId}`;
+      return await this.resumeThreadByTarget(resumeTarget);
     }
 
     if (STOP_COMMANDS.has(trimmed)) {
@@ -217,6 +227,50 @@ export class SessionRouter {
       return threads[index].id;
     }
     return target;
+  }
+
+  private async resolveRecentListTarget(trimmed: string): Promise<{ kind: "project" | "thread"; target: string } | null> {
+    if (!/^\d+$/.test(trimmed)) return null;
+    const context = await this.loadRecentListContext();
+    if (!context) return null;
+    const index = Number(trimmed) - 1;
+    if (index < 0 || index >= context.entries.length) {
+      return {
+        kind: context.kind,
+        target: "__out_of_range__"
+      };
+    }
+    return {
+      kind: context.kind,
+      target: context.entries[index]
+    };
+  }
+
+  private async switchProjectByTarget(target: string): Promise<string> {
+    if (target === "__out_of_range__") {
+      return "Project index out of range.";
+    }
+    const codex = await this.ensureCodexForActiveProject();
+    const status = codex.status();
+    if (status.state === "busy" || status.state === "awaiting_approval") {
+      return "Codex is busy. Send /stop to interrupt, or wait and switch project later.";
+    }
+    const project = await this.registry().resolveTarget(target);
+    await this.switchProject(project);
+    const activeThreadId = await this.loadActiveThreadId();
+    return `Switched project: ${project.key}\nPath: ${project.path}\nThread: ${activeThreadId ? shortThreadId(activeThreadId) : "(none)"}`;
+  }
+
+  private async resumeThreadByTarget(target: string): Promise<string> {
+    if (!target) return "Usage: /resume <index|thread_id>";
+    if (target === "__out_of_range__") {
+      return "Thread index out of range.";
+    }
+    const threadIdToResume = await this.resolveThreadTarget(target);
+    const codex = await this.ensureCodexForActiveProject();
+    const { threadId } = await codex.resumeThread(threadIdToResume);
+    await this.saveActiveThreadId(threadId);
+    return `Resumed Codex thread: ${threadId}`;
   }
 
   private async loadActiveThreadId(): Promise<string> {
@@ -274,14 +328,17 @@ export class SessionRouter {
     }
     const state: BridgeState = {
       activeProjectKey: activeProject.key,
-      activeThreadByProject
+      activeThreadByProject,
+      recentListContext: rawState.recentListContext ?? this.recentListContext
     };
     const needsMigration = rawState.activeThreadId !== undefined
       || rawState.activeProjectKey !== state.activeProjectKey
-      || JSON.stringify(rawState.activeThreadByProject ?? {}) !== JSON.stringify(activeThreadByProject);
+      || JSON.stringify(rawState.activeThreadByProject ?? {}) !== JSON.stringify(activeThreadByProject)
+      || JSON.stringify(rawState.recentListContext ?? null) !== JSON.stringify(state.recentListContext ?? null);
     if (this.store && needsMigration) {
       await this.saveState(state);
     }
+    this.recentListContext = state.recentListContext;
     return { projects, state, activeProject };
   }
 
@@ -289,7 +346,28 @@ export class SessionRouter {
     if (!this.store) return;
     await this.store.writeJson("bridge-state.json", {
       activeProjectKey: state.activeProjectKey,
-      activeThreadByProject: state.activeThreadByProject ?? {}
+      activeThreadByProject: state.activeThreadByProject ?? {},
+      recentListContext: state.recentListContext
+    });
+  }
+
+  private async loadRecentListContext(): Promise<BridgeState["recentListContext"] | undefined> {
+    if (this.store) {
+      const state = await this.store.readJson<BridgeState>("bridge-state.json", {});
+      this.recentListContext = state.recentListContext;
+      return state.recentListContext;
+    }
+    return this.recentListContext;
+  }
+
+  private async saveRecentListContext(context: NonNullable<BridgeState["recentListContext"]>): Promise<void> {
+    this.recentListContext = context;
+    if (!this.store) return;
+    const { state, activeProject } = await this.loadProjectState();
+    await this.saveState({
+      ...state,
+      activeProjectKey: activeProject.key,
+      recentListContext: context
     });
   }
 
@@ -299,9 +377,9 @@ export class SessionRouter {
         path: () => "",
         readJson: async () => ({}),
         writeJson: async () => {}
-      } as unknown as BridgeStore, this.workspace);
+      } as unknown as BridgeStore, this.workspace, this.projectDiscovery);
     }
-    return new ProjectRegistry(this.store, this.workspace);
+    return new ProjectRegistry(this.store, this.workspace, this.projectDiscovery);
   }
 }
 

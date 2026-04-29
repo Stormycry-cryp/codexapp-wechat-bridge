@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -191,6 +191,36 @@ describe("SessionRouter", () => {
     expect(codex.sendTurn).not.toHaveBeenCalled();
   });
 
+  it("resumes thread by bare number after listing threads", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-router-"));
+    try {
+      const store = new BridgeStore(dir);
+      const codex = {
+        status: vi.fn(() => ({ state: "idle" })),
+        startThread: vi.fn(),
+        sendTurn: vi.fn(),
+        listThreads: vi.fn(async () => [
+          { id: "thread-a", name: "Alpha", preview: "A", updatedAt: 1777360000 },
+          { id: "thread-b", name: "Beta", preview: "B", updatedAt: 1777361000 }
+        ]),
+        resumeThread: vi.fn(async (threadId: string) => ({ threadId })),
+        stop: vi.fn()
+      };
+      const router = new SessionRouter(codex, store);
+
+      await expect(router.handleText("线程列表")).resolves.toContain("1. Alpha");
+      await expect(router.handleText("2")).resolves.toContain("thread-b");
+      expect(codex.resumeThread).toHaveBeenCalledWith("thread-b");
+      await expect(store.readJson("bridge-state.json")).resolves.toMatchObject({
+        activeThreadByProject: {
+          "codex-wechat-bridge": "thread-b"
+        }
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("lists configured projects with the current project marker", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cwb-router-"));
     try {
@@ -217,6 +247,64 @@ describe("SessionRouter", () => {
 
       const chineseOutput = await router.handleText("项目列表");
       expect(chineseOutput).toContain("1. bridge");
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("switches project by bare number after listing projects", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-router-"));
+    try {
+      const store = new BridgeStore(dir);
+      await store.writeJson("projects.json", {
+        projects: [
+          { key: "bridge", path: "/work/bridge" },
+          { key: "misc", path: "/work/misc" }
+        ]
+      });
+      await store.writeJson("bridge-state.json", { activeProjectKey: "bridge", activeThreadByProject: {} });
+      const codex = fakeCodex("idle");
+      const router = new SessionRouter(codex, store, { workspace: "/work/bridge" });
+
+      await expect(router.handleText("项目列表")).resolves.toContain("1. bridge");
+      await expect(router.handleText("2")).resolves.toContain("Switched project: misc");
+      await expect(store.readJson("bridge-state.json")).resolves.toMatchObject({
+        activeProjectKey: "misc"
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists auto-discovered projects from Codex session history", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-router-"));
+    try {
+      const store = new BridgeStore(dir);
+      const sessionsDir = join(dir, "sessions");
+      const workspace = join(dir, "bridge");
+      const discovered = join(dir, "history-project");
+      await mkdir(sessionsDir, { recursive: true });
+      await mkdir(workspace, { recursive: true });
+      await mkdir(discovered, { recursive: true });
+      await writeFile(join(discovered, "package.json"), "{}\n");
+      await writeFile(
+        join(sessionsDir, "history.jsonl"),
+        `${JSON.stringify({ type: "session_meta", payload: { cwd: discovered } })}\n`
+      );
+      const codex = fakeCodex("idle");
+      const router = new SessionRouter(codex, store, {
+        workspace,
+        projectDiscovery: {
+          codexHistory: true,
+          codexSessionsDir: sessionsDir
+        }
+      });
+
+      const output = await router.handleText("项目列表");
+
+      expect(output).toContain("1. bridge *");
+      expect(output).toContain("2. history-project");
+      expect(output).toContain(discovered);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
@@ -339,6 +427,31 @@ describe("SessionRouter", () => {
     await expect(idleRouter.handleText("1")).resolves.toBe("sent");
     expect(idleCodex.approvePending).not.toHaveBeenCalled();
     expect(idleCodex.sendTurn).toHaveBeenCalledWith("thread-1", "1");
+  });
+
+  it("keeps approval shortcuts higher priority than recent list context", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-router-"));
+    try {
+      const store = new BridgeStore(dir);
+      await store.writeJson("bridge-state.json", {
+        recentListContext: {
+          kind: "thread",
+          entries: ["thread-a", "thread-b"]
+        }
+      });
+      const codex = {
+        ...fakeCodex("awaiting_approval", "thread-1"),
+        approvePending: vi.fn(async () => "Approved pending Codex request."),
+        denyPending: vi.fn(async () => "Denied pending Codex request.")
+      };
+      const router = new SessionRouter(codex, store);
+
+      await expect(router.handleText("1")).resolves.toContain("Approved");
+      await expect(router.handleText("2")).resolves.toContain("Denied");
+      expect(codex.resumeThread).not.toHaveBeenCalled();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
 

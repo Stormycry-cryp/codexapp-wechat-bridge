@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+## 0.2.9 - 2026-04-29
+
+- Added automatic project discovery:
+  - Merges manual `projects.json` shortcuts with Codex history from `~/.codex/sessions/**/*.jsonl`.
+  - Supports optional `projectDiscovery.discoveryRoots` scanning from `config.json`.
+  - Normalizes historical `cwd` values upward to project roots so non-project paths are filtered out.
+- Added WeChat bare-number list shortcuts:
+  - After `线程列表`, replying with a bare number resumes the matching thread from the most recently shown list.
+  - After `项目列表`, replying with a bare number switches to the matching project from the most recently shown list.
+  - Approval-mode `1` / `2` still keep higher priority for approve / deny.
 - Added inbound WeChat file support:
   - Parses `file_item` media references from iLink updates.
   - Downloads and decrypts file bytes from WeChat CDN.
@@ -16,7 +26,8 @@
   - Adds a minimum send interval to reduce iLink burst failures.
   - Splits oversized chunks proactively and also after `ret=-2` rejections.
 - Maintenance:
-  - Updated the setup banner and README to mention file support.
+  - Updated the setup banner and README to mention file support, project auto-discovery, and bare-number list shortcuts.
+  - Clarified README limits for generated file detection and documented that LaunchAgent installs need a `kickstart` after rebuilding `dist/`.
   - Fixed the local dev dependency range for `@types/node` so `npm install` works with currently available registry versions.
 
 ## 0.2.8 - 2026-04-28

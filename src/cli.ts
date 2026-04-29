@@ -101,6 +101,7 @@ async function run(store: BridgeStore, options: CliOptions): Promise<void> {
   const logger = new Logger(options.dataDir);
   const router = new SessionRouter(new CodexAppServerClient({ cwd: config.workspace }), store, {
     workspace: config.workspace,
+    projectDiscovery: config.projectDiscovery,
     codexFactory: (project) => new CodexAppServerClient({ cwd: project.path })
   });
   const runner = new WechatBridgeRunner({ config, account, store, router, logger });
@@ -122,6 +123,7 @@ async function status(store: BridgeStore, options: CliOptions): Promise<void> {
     dataDir: options.dataDir,
     workspace: config.workspace,
     ilinkBaseUrl: config.ilinkBaseUrl,
+    projectDiscovery: config.projectDiscovery,
     ownerUserId: config.ownerUserId || account?.ilinkUserId || "",
     hasWechatToken: Boolean(account?.token)
   }, null, 2));
@@ -129,7 +131,7 @@ async function status(store: BridgeStore, options: CliOptions): Promise<void> {
 
 async function projectCommand(store: BridgeStore, options: CliOptions, args: string[]): Promise<void> {
   const config = await loadConfig(store, options.cwd);
-  const registry = new ProjectRegistry(store, config.workspace);
+  const registry = new ProjectRegistry(store, config.workspace, config.projectDiscovery);
   const positionals = positionalArgs(args);
   const [subcommand = "list", key, projectPath] = positionals;
   if (subcommand === "list") {
