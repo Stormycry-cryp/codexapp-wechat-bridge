@@ -11,6 +11,7 @@ describe("SessionRouter", () => {
       status: vi.fn(() => ({ state: "busy", activeThreadId: "thread-1" })),
       startThread: vi.fn(),
       sendTurn: vi.fn(),
+      steerTurn: vi.fn(),
       listThreads: vi.fn(),
       resumeThread: vi.fn(),
       stop: vi.fn()
@@ -19,6 +20,42 @@ describe("SessionRouter", () => {
 
     await expect(router.handleText("hello")).resolves.toContain("busy");
     expect(codex.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("steers the active busy turn only for explicit /steer input", async () => {
+    const codex = {
+      ...fakeCodex("busy", "thread-1", "turn-1"),
+      steerTurn: vi.fn(async () => "Steered active Codex turn.")
+    };
+    const router = new SessionRouter(codex);
+
+    await expect(router.handleText("/steer 请优先修复登录问题")).resolves.toBe("Steered active Codex turn.");
+    expect(codex.steerTurn).toHaveBeenCalledWith("thread-1", "turn-1", "请优先修复登录问题");
+    expect(codex.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("steers the active busy turn for the 引导 alias", async () => {
+    const codex = {
+      ...fakeCodex("busy", "thread-1", "turn-1"),
+      steerTurn: vi.fn(async () => "Steered active Codex turn.")
+    };
+    const router = new SessionRouter(codex);
+
+    await expect(router.handleText("引导 请先不要重构，先复现问题")).resolves.toBe("Steered active Codex turn.");
+    expect(codex.steerTurn).toHaveBeenCalledWith("thread-1", "turn-1", "请先不要重构，先复现问题");
+    expect(codex.sendTurn).not.toHaveBeenCalled();
+  });
+
+  it("refuses explicit steer input when there is no active busy turn", async () => {
+    const codex = {
+      ...fakeCodex("idle", "thread-1"),
+      steerTurn: vi.fn(async () => "Steered active Codex turn.")
+    };
+    const router = new SessionRouter(codex);
+
+    await expect(router.handleText("/steer 请改用最小改动")).resolves.toContain("No active Codex turn");
+    await expect(router.handleText("引导 请改用最小改动")).resolves.toContain("No active Codex turn");
+    expect(codex.steerTurn).not.toHaveBeenCalled();
   });
 
   it("creates a thread for /new and sends ordinary text to the active thread", async () => {
@@ -60,6 +97,16 @@ describe("SessionRouter", () => {
     expect(onDelta).toHaveBeenCalledWith("partial");
     expect(onFileOutput).toHaveBeenCalledWith({ path: "/tmp/report.pdf" });
     expect(codex.sendTurn).toHaveBeenCalledWith("thread-1", "stream it", { onDelta, onFileOutput });
+  });
+
+  it("includes recent updates in /help", async () => {
+    const router = new SessionRouter(fakeCodex("idle", "thread-1"));
+
+    const output = await router.handleText("/help");
+
+    expect(output).toContain("近期更新");
+    expect(output).toContain("/steer");
+    expect(output).toContain("编号列表");
   });
 
   it("sends image-only messages to Codex with a default prompt", async () => {
@@ -455,11 +502,16 @@ describe("SessionRouter", () => {
   });
 });
 
-function fakeCodex(state: "idle" | "busy" | "awaiting_approval" | "disconnected", activeThreadId?: string) {
+function fakeCodex(
+  state: "idle" | "busy" | "awaiting_approval" | "disconnected",
+  activeThreadId?: string,
+  activeTurnId?: string
+) {
   return {
-    status: vi.fn(() => ({ state, activeThreadId })),
+    status: vi.fn(() => ({ state, activeThreadId, activeTurnId })),
     startThread: vi.fn(),
     sendTurn: vi.fn(),
+    steerTurn: vi.fn(),
     listThreads: vi.fn(async () => []),
     resumeThread: vi.fn(),
     stop: vi.fn(),

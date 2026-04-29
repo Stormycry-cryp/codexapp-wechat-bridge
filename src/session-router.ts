@@ -16,8 +16,31 @@ type BridgeState = {
 const PROJECT_COMMANDS = ["/projects", "/project", "项目", "/项目", "项目列表", "/项目列表"];
 const THREAD_COMMANDS = ["/threads", "/thread", "/thread列表", "线程", "/线程", "线程列表", "/线程列表"];
 const RESUME_COMMANDS = ["/resume", "切线程", "/切线程", "恢复线程", "/恢复线程"];
+const STEER_COMMANDS = ["/steer", "引导", "/引导"];
 const NEW_THREAD_COMMANDS = new Set(["/new", "新线程", "/新线程"]);
 const STOP_COMMANDS = new Set(["/stop", "停下", "/停下", "停止", "/停止"]);
+
+export function helpMessage(): string {
+  return [
+    "Codex 微信桥帮助",
+    "",
+    "常用命令：",
+    "- /new 或 新线程：新建 Codex 线程",
+    "- /threads、/thread、线程列表：查看最近线程，随后可直接回复数字切换",
+    "- /resume <序号|thread_id>、线程 <序号|thread_id>：切换线程",
+    "- /projects、/project、项目列表：查看项目，随后可直接回复数字切换",
+    "- /project <序号|key>、项目 <序号|key>：切换项目",
+    "- /status：查看 bridge、项目和线程状态",
+    "- /steer <内容>、引导 <内容>：给当前 busy 中的任务追加引导",
+    "- /approve、/deny：处理待审批请求",
+    "- 1 / 2：在审批态下快捷同意 / 拒绝",
+    "- /stop、停下：中断当前任务",
+    "",
+    "近期更新：",
+    "- 新增 /steer <内容> 与 引导 <内容>：只在任务 busy 时向当前 turn 插入额外引导，普通 busy 消息仍会拦截",
+    "- 流式回传更稳：尽量避免过短碎片单独发送，编号列表会尽量按完整条目回传"
+  ].join("\n");
+}
 
 export type SessionRouterHooks = {
   onTurnStart?: () => void | Promise<void>;
@@ -80,19 +103,7 @@ export class SessionRouter {
     if (!trimmed) return "";
 
     if (trimmed === "/help") {
-      return [
-        "Commands:",
-        "/new or 新线程 - start a new Codex thread",
-        "/threads, /thread, or 线程列表 - list recent threads (reply with a number to switch)",
-        "/resume <index|thread_id> or 线程 <index|thread_id> - switch thread",
-        "/projects or 项目列表 - list configured projects (reply with a number to switch)",
-        "/project <index|key> or 项目 <index|key> - switch project",
-        "/status - show bridge status",
-        "/approve - approve pending Codex request",
-        "/deny - deny pending Codex request",
-        "1 / 2 - approve / deny while awaiting approval",
-        "/stop or 停下 - interrupt the active turn"
-      ].join("\n");
+      return helpMessage();
     }
 
     if (trimmed === "/approve") {
@@ -112,6 +123,11 @@ export class SessionRouter {
           ? await (codex.approvePending?.() ?? "This Codex client does not support approvals.")
           : await (codex.denyPending?.() ?? "This Codex client does not support approvals.");
       }
+    }
+
+    const steerTarget = commandTarget(trimmed, STEER_COMMANDS);
+    if (steerTarget !== null) {
+      return await this.handleSteerCommand(steerTarget);
     }
 
     const recentListTarget = await this.resolveRecentListTarget(trimmed);
@@ -214,6 +230,22 @@ export class SessionRouter {
       return await codex.sendTurn(threadId, text, turnOptions);
     }
     return await codex.sendTurn(threadId, text);
+  }
+
+  private async handleSteerCommand(target: string): Promise<string> {
+    const guidance = target.trim();
+    if (!guidance) {
+      return "Usage: /steer <text>";
+    }
+    const codex = await this.ensureCodexForActiveProject();
+    const status = codex.status();
+    if (status.state !== "busy" || !status.activeThreadId || !status.activeTurnId) {
+      return "No active Codex turn to steer.";
+    }
+    if (!codex.steerTurn) {
+      return "This Codex client does not support steer.";
+    }
+    return await codex.steerTurn(status.activeThreadId, status.activeTurnId, guidance);
   }
 
   private async resolveThreadTarget(target: string): Promise<string> {

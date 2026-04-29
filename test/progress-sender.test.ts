@@ -58,6 +58,56 @@ describe("ProgressSender", () => {
     expect(sent).toEqual(["运行：\n```bash\nnpm run build\n```", "完成。"]);
   });
 
+  it("does not stream a tiny paragraph fragment by itself before later content completes the thought", async () => {
+    const sent: string[] = [];
+    const sender = new ProgressSender({
+      send: async (text) => {
+        sent.push(text);
+      },
+      logger: fakeLogger(),
+      minSendIntervalMs: 0
+    });
+
+    sender.push("不再\n\n继续拆，但把整理归档改名成整理归档_历史备份");
+    await sender.settle();
+
+    expect(sent).toEqual([]);
+
+    sender.push("。");
+    await sender.flushAll();
+
+    expect(sent).toEqual(["不再\n\n继续拆，但把整理归档改名成整理归档_历史备份。"]);
+  });
+
+  it("keeps numbered list items intact instead of splitting on the list marker", async () => {
+    const sent: string[] = [];
+    const sender = new ProgressSender({
+      send: async (text) => {
+        sent.push(text);
+      },
+      logger: fakeLogger(),
+      minSendIntervalMs: 0
+    });
+
+    sender.push("如果你要更彻底，我下一步可以二选一：\n1.");
+    await sender.settle();
+    expect(sent).toEqual([]);
+
+    sender.push(" 把整理归档里所有老月份也继续并进项目整理\n2.");
+    await sender.settle();
+    expect(sent).toEqual([
+      "如果你要更彻底，我下一步可以二选一：\n1. 把整理归档里所有老月份也继续并进项目整理"
+    ]);
+
+    sender.push(" 只保留整理归档_历史备份，把它改名，避免你以后误点");
+    await sender.flushAll();
+
+    expect(sent).toEqual([
+      "如果你要更彻底，我下一步可以二选一：\n1. 把整理归档里所有老月份也继续并进项目整理",
+      "2. 只保留整理归档_历史备份，把它改名，避免你以后误点"
+    ]);
+  });
+
   it("retries transient send failures before giving up on a chunk", async () => {
     const sent: string[] = [];
     let attempts = 0;

@@ -62,6 +62,7 @@ export interface CodexBridgeClient {
   resumeThread(threadId: string): Promise<{ threadId: string }>;
   listThreads(): Promise<CodexThreadSummary[]>;
   sendTurn(threadId: string, text: string, options?: CodexTurnOptions, images?: CodexInputImage[], files?: CodexInputFile[]): Promise<string>;
+  steerTurn?(threadId: string, turnId: string, text: string, images?: CodexInputImage[], files?: CodexInputFile[]): Promise<string>;
   approvePending?(): Promise<string>;
   denyPending?(): Promise<string>;
   stop(): Promise<string>;
@@ -189,6 +190,18 @@ export class CodexAppServerClient implements CodexBridgeClient {
       this.resetActiveTurnState();
       throw error;
     }
+  }
+
+  async steerTurn(threadId: string, turnId: string, text: string, images: CodexInputImage[] = [], files: CodexInputFile[] = []): Promise<string> {
+    if (this.currentStatus.state !== "busy") {
+      throw new Error("codex is not running a steerable turn");
+    }
+    await this.request<{ turnId: string }>("turn/steer", {
+      threadId,
+      expectedTurnId: turnId,
+      input: buildTurnInput(text, images, files)
+    });
+    return "Steered active Codex turn.";
   }
 
   async stop(): Promise<string> {
