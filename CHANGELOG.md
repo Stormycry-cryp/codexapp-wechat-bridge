@@ -5,6 +5,10 @@
 - Improved streamed reply cohesion:
   - Avoids sending tiny paragraph fragments as standalone WeChat bubbles when the surrounding thought has not arrived yet.
   - Keeps numbered list items together instead of splitting at `1.` / `2.` list markers.
+- Hardened long-running turn delivery:
+  - Replaced the short absolute turn timeout with a 24-hour idle timeout that is refreshed by live Codex activity.
+  - Sends one hourly keepalive notice during long silent stretches so WeChat users can tell the task is still running.
+  - Routes final plain-text replies and fallback text through the same split-and-retry delivery path as streamed chunks.
 
 ## 0.2.10 - 2026-04-29
 

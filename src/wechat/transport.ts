@@ -23,6 +23,8 @@ type WelcomeState = {
 };
 
 const WELCOME_MESSAGE_VERSION = 2;
+const LONG_TASK_KEEPALIVE_INTERVAL_MS = 60 * 60_000;
+const LONG_TASK_KEEPALIVE_MESSAGE = "任务仍在处理中，暂无新进展；/stop 可中断。";
 
 export type WechatBridgeRunnerOptions = {
   config: BridgeConfig;
@@ -128,6 +130,7 @@ export class WechatBridgeRunner {
     });
 
     const progress = this.createProgressSender(message.userId, token);
+    const longTaskKeepalive = this.createLongTaskKeepalive(progress);
     const images = await this.saveInboundImages(message);
     const files = await this.saveInboundFiles(message);
     const inboundAttachmentCount = (message.images?.length ?? 0) + (message.files?.length ?? 0);
@@ -148,13 +151,21 @@ export class WechatBridgeRunner {
         images,
         files
       }, {
-        onDelta: (delta) => progress.push(delta),
-        onApproval: (request) => progress.sendNotice(request.summary),
+        onDelta: (delta) => {
+          longTaskKeepalive.markActivity();
+          progress.push(delta);
+        },
+        onApproval: async (request) => {
+          longTaskKeepalive.markActivity();
+          await progress.sendNotice(request.summary);
+        },
         onImageOutput: async (output) => {
+          longTaskKeepalive.markActivity();
           await this.sendImageOutput(message.userId, token, output);
           deliveredNativeOutput = true;
         },
         onFileOutput: async (output) => {
+          longTaskKeepalive.markActivity();
           await this.sendFileOutput(message.userId, token, output);
           deliveredNativeOutput = true;
         }
@@ -162,18 +173,20 @@ export class WechatBridgeRunner {
     } catch (error) {
       reply = `Bridge error: ${describeError(error)}`;
       await this.options.logger.error("router failed", error);
+    } finally {
+      longTaskKeepalive.stop();
     }
 
     await progress.flushAll();
     let sentIncompleteFallback = false;
     if (progress.hasDeliveryFailure() && reply) {
-      await progress.sendNotice(`流式回传不完整，下面是完整回复：\n\n${reply}`);
+      await this.sendTextReliably(message.userId, token, `流式回传不完整，下面是完整回复：\n\n${reply}`);
       sentIncompleteFallback = true;
     }
     if (progress.hasStreamedOutput()) {
       await progress.sendNotice("Codex 已完成。");
     } else if (reply && !sentIncompleteFallback && !(deliveredNativeOutput && reply === "(Codex completed without text output.)")) {
-      await this.sendText(message.userId, token, reply);
+      await this.sendTextReliably(message.userId, token, reply);
     }
   }
 
@@ -188,6 +201,15 @@ export class WechatBridgeRunner {
     await this.api.sendText(userId, text, contextToken, `cwb-${randomBytes(6).toString("hex")}`);
   }
 
+  private async sendTextReliably(userId: string, contextToken: string, text: string): Promise<void> {
+    const sender = this.createProgressSender(userId, contextToken);
+    await sender.sendNotice(text);
+    await sender.settle();
+    if (sender.hasAnyDeliveryFailure()) {
+      throw new Error("failed to fully deliver text reply");
+    }
+  }
+
   private async sendStartupWelcomeIfPossible(): Promise<void> {
     const owner = this.ownerUserId();
     if (!owner) return;
@@ -200,7 +222,7 @@ export class WechatBridgeRunner {
   private async maybeSendWelcome(userId: string, contextToken: string): Promise<void> {
     const state = await this.options.store.readJson<WelcomeState>("welcome-state.json", {});
     if (welcomeVersionForUser(state, userId) >= WELCOME_MESSAGE_VERSION) return;
-    await this.sendText(userId, contextToken, welcomeMessage());
+    await this.sendTextReliably(userId, contextToken, welcomeMessage());
     await this.options.store.writeJson("welcome-state.json", {
       version: WELCOME_MESSAGE_VERSION,
       sentTo: {
@@ -220,7 +242,7 @@ export class WechatBridgeRunner {
         hasPath: Boolean(output.path),
         hasUrl: Boolean(output.url)
       });
-      await this.sendText(userId, contextToken, output.fallbackText);
+      await this.sendTextReliably(userId, contextToken, output.fallbackText);
     }
   }
 
@@ -233,8 +255,44 @@ export class WechatBridgeRunner {
         error: describeError(error),
         path: output.path
       });
-      await this.sendText(userId, contextToken, output.fallbackText);
+      await this.sendTextReliably(userId, contextToken, output.fallbackText);
     }
+  }
+
+  private createLongTaskKeepalive(progress: ProgressSender): { markActivity: () => void; stop: () => void } {
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
+
+    const schedule = () => {
+      if (stopped) return;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        if (stopped) return;
+        void progress.sendNotice(LONG_TASK_KEEPALIVE_MESSAGE)
+          .catch(async (error) => {
+            await this.options.logger.warn("failed to send long-task keepalive", describeError(error));
+          })
+          .finally(() => {
+            schedule();
+          });
+      }, LONG_TASK_KEEPALIVE_INTERVAL_MS);
+      timer.unref?.();
+    };
+
+    schedule();
+    return {
+      markActivity: () => {
+        schedule();
+      },
+      stop: () => {
+        stopped = true;
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+      }
+    };
   }
 
   private async loadOutputImageBytes(output: CodexImageOutput): Promise<Buffer> {

@@ -73,7 +73,7 @@ export type CodexAppServerClientOptions = {
   cwd: string;
   command?: string;
   args?: string[];
-  turnTimeoutMs?: number;
+  turnIdleTimeoutMs?: number;
   desktopRefresh?: boolean;
 };
 
@@ -181,9 +181,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
       return await new Promise<string>((resolve, reject) => {
         this.activeWaiter = resolve;
         this.activeRejecter = reject;
-        this.activeTimer = setTimeout(() => {
-          this.finishTurn(new Error(`Codex turn timed out after ${this.turnTimeoutMs()}ms.`));
-        }, this.turnTimeoutMs());
+        this.armTurnIdleTimer();
       });
     } catch (error) {
       this.currentStatus = { state: "idle", activeThreadId: this.activeThreadId || threadId };
@@ -235,6 +233,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
 
   private handleNotification(method: string, params: unknown): void {
     const record = params && typeof params === "object" ? params as Record<string, unknown> : {};
+    this.noteTurnActivity();
     if (method === "item/agentMessage/delta" && typeof record.delta === "string") {
       this.activeReply += record.delta;
       void Promise.resolve(this.activeDeltaHandler?.(record.delta)).catch(() => {});
@@ -275,6 +274,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
       this.rpc?.respond(id, { error: `Unsupported server request: ${method}` });
       return;
     }
+    this.noteTurnActivity();
     const request = formatApprovalRequest(method, params);
     this.pendingApproval = { id, method, params, request };
     this.currentStatus = { state: "awaiting_approval", activeThreadId: this.activeThreadId, activeTurnId: this.activeTurnId };
@@ -287,6 +287,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
     this.pendingApproval = null;
     this.rpc.respond(pending.id, approvalResponse(pending.method, pending.params, accept));
     this.currentStatus = { state: "busy", activeThreadId: this.activeThreadId, activeTurnId: this.activeTurnId };
+    this.noteTurnActivity();
     return accept ? "Approved pending Codex request." : "Denied pending Codex request.";
   }
 
@@ -345,8 +346,23 @@ export class CodexAppServerClient implements CodexBridgeClient {
     this.pendingApproval = null;
   }
 
-  private turnTimeoutMs(): number {
-    return this.options.turnTimeoutMs ?? 20 * 60_000;
+  private armTurnIdleTimer(): void {
+    if (this.activeTimer) {
+      clearTimeout(this.activeTimer);
+    }
+    this.activeTimer = setTimeout(() => {
+      this.finishTurn(new Error(`Codex turn timed out after ${this.turnIdleTimeoutMs()}ms of inactivity.`));
+    }, this.turnIdleTimeoutMs());
+  }
+
+  private noteTurnActivity(): void {
+    if (!this.activeWaiter || !this.activeTurnId) return;
+    if (this.currentStatus.state !== "busy" && this.currentStatus.state !== "awaiting_approval") return;
+    this.armTurnIdleTimer();
+  }
+
+  private turnIdleTimeoutMs(): number {
+    return this.options.turnIdleTimeoutMs ?? 24 * 60 * 60_000;
   }
 
   private refreshDesktopThread(threadId: string): void {

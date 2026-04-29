@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import { BridgeStore } from "../src/storage.js";
 import { encryptWechatCdnPayload } from "../src/wechat/media.js";
@@ -9,8 +9,13 @@ import { ProgressSender } from "../src/wechat/progress-sender.js";
 import { WechatBridgeRunner } from "../src/wechat/transport.js";
 
 describe("WechatBridgeRunner onboarding", () => {
+  beforeEach(() => {
+    vi.useRealTimers();
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.useRealTimers();
   });
 
   it("sends the usage guide once when the first reply context token is available", async () => {
@@ -281,6 +286,86 @@ describe("WechatBridgeRunner onboarding", () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("reliably splits a long final reply even when there was no streamed delta", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-runner-"));
+    try {
+      const sentTexts: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "https://ilinkai.weixin.qq.com/ilink/bot/sendmessage") {
+          const body = JSON.parse(String(init?.body));
+          const text = body.msg.item_list[0].text_item.text;
+          if (text.length > 8) {
+            return new Response(JSON.stringify({ ret: -3, errcode: 0, errmsg: "payload too large" }));
+          }
+          sentTexts.push(text);
+          return new Response(JSON.stringify({ ret: 0 }));
+        }
+        throw new Error(`unexpected url: ${url} ${String(init?.method ?? "GET")}`);
+      }));
+
+      const store = new BridgeStore(dir);
+      await store.writeJson("welcome-state.json", { version: 2, sentTo: { "user@im.wechat": 2 } });
+      const runner = new WechatBridgeRunner({
+        config: { ...defaultConfig("/work"), ownerUserId: "user@im.wechat", longPollTimeoutMs: 10 },
+        account: { token: "token" },
+        store,
+        router: {
+          handleInput: vi.fn(async () => "ABCDEFGHIJKLMN")
+        } as never,
+        logger: fakeLogger()
+      });
+      const handleMessage = (runner as unknown as {
+        handleMessage(message: { id: string; userId: string; content: string; contextToken: string }): Promise<void>;
+      }).handleMessage.bind(runner);
+
+      await handleMessage({ id: "12", userId: "user@im.wechat", content: "/long", contextToken: "ctx" });
+
+      expect(sentTexts.join("")).toBe("ABCDEFGHIJKLMN");
+      expect(sentTexts.every((text) => text.length <= 8)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("sends at most one idle keepalive per hour while a long task stays quiet", async () => {
+    vi.useFakeTimers();
+    const runner = new WechatBridgeRunner({
+      config: { ...defaultConfig("/work"), ownerUserId: "user@im.wechat", longPollTimeoutMs: 10 },
+      account: { token: "token" },
+      store: {} as never,
+      router: {} as never,
+      logger: fakeLogger()
+    });
+    const sentTexts: string[] = [];
+    const keepalive = (runner as unknown as {
+      createLongTaskKeepalive(progress: { sendNotice(text: string): Promise<void> }): {
+        markActivity(): void;
+        stop(): void;
+      };
+    }).createLongTaskKeepalive({
+      sendNotice: vi.fn(async (text: string) => {
+        sentTexts.push(text);
+      })
+    });
+
+    await vi.advanceTimersByTimeAsync(59 * 60 * 1000);
+    expect(sentTexts).toHaveLength(0);
+
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(sentTexts.filter((text) => text.includes("仍在处理中"))).toHaveLength(1);
+
+    keepalive.markActivity();
+    await vi.advanceTimersByTimeAsync(59 * 60 * 1000);
+    expect(sentTexts.filter((text) => text.includes("仍在处理中"))).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(60 * 1000);
+    expect(sentTexts.filter((text) => text.includes("仍在处理中"))).toHaveLength(2);
+
+    keepalive.stop();
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000);
+    expect(sentTexts.filter((text) => text.includes("仍在处理中"))).toHaveLength(2);
   });
 });
 

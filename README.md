@@ -51,9 +51,12 @@ It is intentionally small:
 - More reliable streaming:
   - Throttle chunk sends to avoid iLink burst failures.
   - Retry transient send failures.
+  - Treat Codex turn timeout as a long idle timeout instead of a short absolute wall-clock limit; the default idle budget is now 24 hours.
+  - Send an hourly keepalive notice when a long-running turn has no new visible progress, so WeChat does not look dead during quiet stretches.
   - Avoid tiny paragraph fragments becoming standalone WeChat bubbles mid-reply.
   - Keep numbered list items together instead of splitting on `1.` / `2.` markers.
   - Split oversized chunks before or after `ret=-2` rejections so replies do not get cut off halfway.
+  - Route final plain-text replies, streamed-reply fallbacks, and native media text fallbacks through the same split-and-retry path.
   - If a streamed chunk still cannot be delivered completely after split retries, send the complete final reply as a fallback so partial bubbles do not hide the rest of the answer.
 
 ## Requirements
@@ -216,6 +219,8 @@ Plain text is sent to the active thread in the current project. If no active thr
 When Codex is busy or waiting for approval, ordinary text and project switching are rejected instead of queued. Use `/stop` to interrupt.
 
 If Codex is already busy and you want to inject extra guidance into the current running turn, use `/steer <text>` or `引导 <内容>`. This is explicit-only: ordinary text is still rejected while busy.
+
+For long-running turns, the bridge now treats timeout as inactivity-based rather than a short fixed wall-clock deadline. If Codex stays quiet for a long time, WeChat receives one keepalive notice per hour until new activity arrives or the turn finishes.
 
 ## Images And Files
 
