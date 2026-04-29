@@ -15,6 +15,7 @@ export type ProgressSenderOptions = {
 export class ProgressSender {
   private buffer = "";
   private streamedOutput = false;
+  private deliveryFailed = false;
   private queue: Promise<void> = Promise.resolve();
   private readonly maxMessageLength: number;
   private readonly minSendIntervalMs: number;
@@ -33,6 +34,10 @@ export class ProgressSender {
 
   hasStreamedOutput(): boolean {
     return this.streamedOutput;
+  }
+
+  hasDeliveryFailure(): boolean {
+    return this.deliveryFailed;
   }
 
   sendNotice(text: string): Promise<void> {
@@ -143,6 +148,7 @@ export class ProgressSender {
     if (!trimmed) return;
     const sent = await this.tryDeliver(trimmed, countsAsProgress);
     if (!sent) {
+      if (countsAsProgress) this.deliveryFailed = true;
       await this.options.logger.warn("dropping undeliverable progress chunk", {
         length: trimmed.length,
         preview: trimmed.slice(0, 120)

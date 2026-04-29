@@ -2,7 +2,7 @@
 
 Slim local bridge for personal WeChat iLink messages to `codex app-server`.
 
-Current release: `0.2.9`
+Current release: `0.2.10`
 
 ## What It Does
 
@@ -50,6 +50,7 @@ It is intentionally small:
   - Throttle chunk sends to avoid iLink burst failures.
   - Retry transient send failures.
   - Split oversized chunks before or after `ret=-2` rejections so replies do not get cut off halfway.
+  - If a streamed chunk still cannot be delivered completely after split retries, send the complete final reply as a fallback so partial bubbles do not hide the rest of the answer.
 
 ## Requirements
 
@@ -68,6 +69,8 @@ npm run build
 The build output goes to `dist/`.
 
 If you rebuild a LaunchAgent-managed install, run `launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"` afterward so the running agent reloads the new `dist` files.
+
+The same `kickstart` command is the normal one-line restart after a local fix has been built.
 
 ## Setup
 

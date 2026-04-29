@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import { BridgeStore } from "../src/storage.js";
 import { encryptWechatCdnPayload } from "../src/wechat/media.js";
+import { ProgressSender } from "../src/wechat/progress-sender.js";
 import { WechatBridgeRunner } from "../src/wechat/transport.js";
 
 describe("WechatBridgeRunner onboarding", () => {
@@ -173,6 +174,62 @@ describe("WechatBridgeRunner onboarding", () => {
           }
         }]
       });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("falls back to the complete final reply when streaming split retries only deliver partial text", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-runner-"));
+    try {
+      const sentTexts: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "https://ilinkai.weixin.qq.com/ilink/bot/sendmessage") {
+          const body = JSON.parse(String(init?.body));
+          const text = body.msg.item_list[0].text_item.text;
+          sentTexts.push(text);
+          if (!text.startsWith("流式回传不完整") && text.includes("K")) {
+            return new Response(JSON.stringify({ ret: -3, errcode: 0, errmsg: "payload too large" }));
+          }
+          return new Response(JSON.stringify({ ret: 0 }));
+        }
+        throw new Error(`unexpected url: ${url} ${String(init?.method ?? "GET")}`);
+      }));
+
+      const store = new BridgeStore(dir);
+      await store.writeJson("welcome-state.json", { sentTo: { "user@im.wechat": true } });
+      const runner = new WechatBridgeRunner({
+        config: { ...defaultConfig("/work"), ownerUserId: "user@im.wechat", longPollTimeoutMs: 10 },
+        account: { token: "token" },
+        store,
+        router: {
+          handleInput: vi.fn(async (_input, hooks?: { onDelta?: (delta: string) => void }) => {
+            hooks?.onDelta?.("ABCDEFGHIJKLMN");
+            return "ABCDEFGHIJKLMN";
+          })
+        } as never,
+        logger: fakeLogger()
+      });
+      vi.spyOn(runner as unknown as {
+        createProgressSender(userId: string, contextToken: string): ProgressSender;
+      }, "createProgressSender").mockImplementation((userId, contextToken) => new ProgressSender({
+        send: async (text) => {
+          await (runner as unknown as {
+            sendText(userId: string, contextToken: string, text: string): Promise<void>;
+          }).sendText(userId, contextToken, text);
+        },
+        logger: fakeLogger(),
+        minSendIntervalMs: 0,
+        retryDelaysMs: [],
+        sleep: async () => {}
+      }));
+      const handleMessage = (runner as unknown as {
+        handleMessage(message: { id: string; userId: string; content: string; contextToken: string }): Promise<void>;
+      }).handleMessage.bind(runner);
+
+      await handleMessage({ id: "11", userId: "user@im.wechat", content: "stream please", contextToken: "ctx" });
+
+      expect(sentTexts).toContain("流式回传不完整，下面是完整回复：\n\nABCDEFGHIJKLMN");
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

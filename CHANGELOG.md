@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+## 0.2.10 - 2026-04-29
+
+- Fixed an additional streamed reply truncation case:
+  - Tracks when a progress chunk cannot be fully delivered after retry/split handling.
+  - Sends the complete final Codex reply as a fallback when streaming was only partially delivered, so WeChat does not show a few tiny bubbles and lose the rest of the content.
+
 ## 0.2.9 - 2026-04-29
 
 - Added automatic project discovery:
