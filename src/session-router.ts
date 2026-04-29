@@ -1,4 +1,4 @@
-import type { CodexApprovalRequest, CodexBridgeClient, CodexImageOutput, CodexInputImage, CodexTurnOptions } from "./codex/app-server-client.js";
+import type { CodexApprovalRequest, CodexBridgeClient, CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage, CodexTurnOptions } from "./codex/app-server-client.js";
 import { ProjectRegistry, formatProjectLine, type BridgeProject } from "./projects.js";
 import type { BridgeStore } from "./storage.js";
 
@@ -19,6 +19,7 @@ export type SessionRouterHooks = {
   onDelta?: (delta: string) => void | Promise<void>;
   onApproval?: (request: CodexApprovalRequest) => void | Promise<void>;
   onImageOutput?: (output: CodexImageOutput) => void | Promise<void>;
+  onFileOutput?: (output: CodexFileOutput) => void | Promise<void>;
 };
 
 export type SessionRouterOptions = {
@@ -29,6 +30,7 @@ export type SessionRouterOptions = {
 export type SessionRouterInput = {
   text: string;
   images?: CodexInputImage[];
+  files?: CodexInputFile[];
 };
 
 export class SessionRouter {
@@ -53,15 +55,16 @@ export class SessionRouter {
 
   async handleInput(input: SessionRouterInput, hooks: SessionRouterHooks = {}): Promise<string> {
     const images = input.images ?? [];
+    const files = input.files ?? [];
     const trimmed = input.text.trim();
-    if (!trimmed && images.length === 0) return "";
+    if (!trimmed && images.length === 0 && files.length === 0) return "";
 
-    if (images.length === 0) {
+    if (images.length === 0 && files.length === 0) {
       const commandReply = await this.handleCommand(trimmed, hooks);
       if (commandReply !== null) return commandReply;
     }
 
-    return this.handleOrdinaryInput(trimmed || "请分析这张图片。", images, hooks);
+    return this.handleOrdinaryInput(defaultPrompt(trimmed, images, files), images, files, hooks);
   }
 
   private async handleCommand(trimmed: string, _hooks: SessionRouterHooks): Promise<string | null> {
@@ -172,7 +175,7 @@ export class SessionRouter {
     return null;
   }
 
-  private async handleOrdinaryInput(text: string, images: CodexInputImage[], hooks: SessionRouterHooks): Promise<string> {
+  private async handleOrdinaryInput(text: string, images: CodexInputImage[], files: CodexInputFile[], hooks: SessionRouterHooks): Promise<string> {
     const codex = await this.ensureCodexForActiveProject();
     const status = codex.status();
     if (status.state === "busy" || status.state === "awaiting_approval") {
@@ -191,6 +194,9 @@ export class SessionRouter {
     }
     await hooks.onTurnStart?.();
     const turnOptions = buildTurnOptions(hooks);
+    if (files.length > 0) {
+      return await codex.sendTurn(threadId, text, turnOptions, images, files);
+    }
     if (images.length > 0) {
       return await codex.sendTurn(threadId, text, turnOptions, images);
     }
@@ -299,6 +305,13 @@ export class SessionRouter {
   }
 }
 
+function defaultPrompt(text: string, images: CodexInputImage[], files: CodexInputFile[]): string {
+  if (text) return text;
+  if (images.length > 0 && files.length === 0) return "请分析这张图片。";
+  if (files.length > 0 && images.length === 0) return "请查看我附带的文件。";
+  return "请查看我附带的图片和文件。";
+}
+
 function formatThreadLine(index: number, id: string, name: string, preview: string, updatedAt: number | undefined, active: boolean): string {
   const marker = active ? " *" : "";
   const previewText = preview && preview !== name ? ` - ${truncate(preview, 28)}` : "";
@@ -317,11 +330,12 @@ function commandTarget(trimmed: string, aliases: string[]): string | null {
 }
 
 function buildTurnOptions(hooks: SessionRouterHooks): CodexTurnOptions | undefined {
-  if (!hooks.onDelta && !hooks.onApproval && !hooks.onImageOutput) return undefined;
+  if (!hooks.onDelta && !hooks.onApproval && !hooks.onImageOutput && !hooks.onFileOutput) return undefined;
   return {
     ...(hooks.onDelta ? { onDelta: hooks.onDelta } : {}),
     ...(hooks.onApproval ? { onApproval: hooks.onApproval } : {}),
-    ...(hooks.onImageOutput ? { onImageOutput: hooks.onImageOutput } : {})
+    ...(hooks.onImageOutput ? { onImageOutput: hooks.onImageOutput } : {}),
+    ...(hooks.onFileOutput ? { onFileOutput: hooks.onFileOutput } : {})
   };
 }
 

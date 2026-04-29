@@ -1,9 +1,10 @@
-import type { IlinkMessage, IlinkMessageItem, InboundWechatMessage } from "./types.js";
+import type { IlinkCdnMedia, IlinkMessage, IlinkMessageItem, InboundWechatMessage, WechatCdnRef, WechatFileRef } from "./types.js";
 
 const MESSAGE_TYPE_USER = 1;
 const MESSAGE_TYPE_BOT = 2;
 const ITEM_TYPE_TEXT = 1;
 const ITEM_TYPE_IMAGE = 2;
+const ITEM_TYPE_FILE = 4;
 
 export function parseTextFromItems(items: IlinkMessageItem[] = []): string {
   const parts: string[] = [];
@@ -24,14 +25,22 @@ export function parseTextFromItems(items: IlinkMessageItem[] = []): string {
 export function parseImagesFromItems(items: IlinkMessageItem[] = []) {
   return items.flatMap((item) => {
     if (item.type !== ITEM_TYPE_IMAGE) return [];
-    const media = item.image_item?.media;
-    const encryptedQueryParam = media?.encrypt_query_param?.trim();
-    if (!encryptedQueryParam) return [];
+    const ref = parseCdnRef(item.image_item?.media, item.image_item?.aeskey);
+    return ref ? [ref] : [];
+  });
+}
+
+export function parseFilesFromItems(items: IlinkMessageItem[] = []) {
+  return items.flatMap((item) => {
+    if (item.type !== ITEM_TYPE_FILE) return [];
+    const ref = parseCdnRef(item.file_item?.media, item.file_item?.aeskey);
+    if (!ref) return [];
     return [{
-      encryptedQueryParam,
-      aesKey: media?.aes_key?.trim() || undefined,
-      aesKeyHex: item.image_item?.aeskey?.trim() || undefined
-    }];
+      ...ref,
+      fileName: item.file_item?.file_name?.trim() || undefined,
+      md5: item.file_item?.md5?.trim() || undefined,
+      length: parseLength(item.file_item?.len)
+    } satisfies WechatFileRef];
   });
 }
 
@@ -50,7 +59,8 @@ export function toInboundWechatMessage(message: IlinkMessage): InboundWechatMess
 
   const content = parseTextFromItems(message.item_list ?? []);
   const images = parseImagesFromItems(message.item_list ?? []);
-  if (!content && images.length === 0) {
+  const files = parseFilesFromItems(message.item_list ?? []);
+  if (!content && images.length === 0 && files.length === 0) {
     return null;
   }
 
@@ -59,6 +69,27 @@ export function toInboundWechatMessage(message: IlinkMessage): InboundWechatMess
     userId,
     content,
     contextToken: message.context_token?.trim() ?? "",
-    ...(images.length > 0 ? { images } : {})
+    ...(images.length > 0 ? { images } : {}),
+    ...(files.length > 0 ? { files } : {})
+  };
+}
+
+function parseLength(value: number | string | undefined): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+    return value;
+  }
+  if (typeof value === "string" && /^\d+$/.test(value.trim())) {
+    return Number(value.trim());
+  }
+  return undefined;
+}
+
+function parseCdnRef(media: IlinkCdnMedia | undefined, aesKeyHex: string | undefined): WechatCdnRef | null {
+  const encryptedQueryParam = media?.encrypt_query_param?.trim();
+  if (!encryptedQueryParam) return null;
+  return {
+    encryptedQueryParam,
+    aesKey: media?.aes_key?.trim() || undefined,
+    aesKeyHex: aesKeyHex?.trim() || undefined
   };
 }

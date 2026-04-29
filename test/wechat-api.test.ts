@@ -69,4 +69,54 @@ describe("IlinkApiClient", () => {
 
     expect(fetchImpl).toHaveBeenCalledTimes(3);
   });
+
+  it("uploads and sends native WeChat file messages", async () => {
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      if (url === "https://ilink.example/ilink/bot/getuploadurl") {
+        const body = JSON.parse(String(init?.body));
+        expect(body.media_type).toBe(3);
+        expect(body.to_user_id).toBe("user@im.wechat");
+        expect(body.rawsize).toBe(16);
+        expect(body.filesize).toBe(32);
+        expect(body.rawfilemd5).toMatch(/^[0-9a-f]{32}$/);
+        expect(body.aeskey).toMatch(/^[0-9a-f]{32}$/);
+        return new Response(JSON.stringify({ upload_param: "upload-file-param" }));
+      }
+      if (url.startsWith("https://cdn.example/c2c/upload?encrypted_query_param=upload-file-param&filekey=")) {
+        const encrypted = Buffer.from(await new Response(init?.body).arrayBuffer());
+        expect(encrypted.length).toBe(32);
+        return new Response("", { headers: { "x-encrypted-param": "download-file-param" } });
+      }
+      if (url === "https://ilink.example/ilink/bot/sendmessage") {
+        const body = JSON.parse(String(init?.body));
+        expect(body.msg.to_user_id).toBe("user@im.wechat");
+        expect(body.msg.context_token).toBe("ctx");
+        expect(body.msg.item_list[0]).toMatchObject({
+          type: 4,
+          file_item: {
+            file_name: "report.pdf",
+            md5: expect.stringMatching(/^[0-9a-f]{32}$/),
+            len: "16",
+            media: {
+              encrypt_query_param: "download-file-param",
+              encrypt_type: 1
+            }
+          }
+        });
+        expect(body.msg.item_list[0].file_item.media.aes_key).toMatch(/^[A-Za-z0-9+/]+=*$/);
+        return new Response(JSON.stringify({ ret: 0 }));
+      }
+      throw new Error(`unexpected url: ${url}`);
+    });
+    const client = new IlinkApiClient({
+      baseUrl: "https://ilink.example",
+      cdnBaseUrl: "https://cdn.example/c2c",
+      token: "secret-token",
+      fetchImpl
+    });
+
+    await expect(client.sendFile("user@im.wechat", "report.pdf", Buffer.from("report-body-1234"), "ctx", "client-file")).resolves.toBeUndefined();
+
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
 });

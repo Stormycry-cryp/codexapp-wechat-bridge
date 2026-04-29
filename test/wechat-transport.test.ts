@@ -61,4 +61,40 @@ describe("wechat message parser", () => {
       }]
     });
   });
+
+  it("keeps file media references even when the message has no text", () => {
+    expect(
+      toInboundWechatMessage({
+        message_id: 44,
+        message_type: 1,
+        from_user_id: "user@im.wechat",
+        context_token: "ctx",
+        item_list: [{
+          type: 4,
+          file_item: {
+            file_name: "spec.pdf",
+            md5: "abc123",
+            len: "12",
+            media: {
+              encrypt_query_param: "file-param",
+              aes_key: "base64-key",
+              encrypt_type: 1
+            }
+          }
+        }]
+      })
+    ).toEqual({
+      id: "44",
+      userId: "user@im.wechat",
+      content: "",
+      contextToken: "ctx",
+      files: [{
+        encryptedQueryParam: "file-param",
+        aesKey: "base64-key",
+        fileName: "spec.pdf",
+        md5: "abc123",
+        length: 12
+      }]
+    });
+  });
 });

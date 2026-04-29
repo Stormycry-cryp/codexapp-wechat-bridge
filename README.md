@@ -13,7 +13,8 @@ It is intentionally small:
 - One WeChat owner.
 - A whitelist of local projects.
 - One active Codex thread per project.
-- Text-first chat with image input and native image replies.
+- Text-first chat with image input, native image replies, and native file replies for generated workspace artifacts.
+- Inbound WeChat file download and local-path handoff to Codex.
 - No OpenClaw runtime, plugin host, web admin panel, or Desktop UI automation.
 
 `Codex.app` can coexist with the same persisted threads, but the bridge talks to `codex app-server` directly.
@@ -32,9 +33,22 @@ It is intentionally small:
   - Decrypt AES media payloads.
   - Save under `~/.codex-wechat-bridge/assets/`.
   - Send to Codex as `localImage` inputs.
+- Inbound WeChat files:
+  - Download from iLink CDN.
+  - Decrypt AES media payloads.
+  - Save under `~/.codex-wechat-bridge/assets/YYYY-MM-DD/files/`.
+  - Forward the saved local paths to Codex in the turn text so Codex can read them directly.
 - Codex image outputs:
   - Try native WeChat image reply through iLink CDN upload.
   - Fall back to text URL/path if native upload fails.
+- Codex file outputs:
+  - Detect newly generated workspace artifacts after a turn finishes.
+  - Send supported artifacts back as native WeChat files.
+  - Fall back to text path if native upload fails.
+- More reliable streaming:
+  - Throttle chunk sends to avoid iLink burst failures.
+  - Retry transient send failures.
+  - Split oversized chunks before or after `ret=-2` rejections so replies do not get cut off halfway.
 
 ## Requirements
 
@@ -166,11 +180,15 @@ Plain text is sent to the active thread in the current project. If no active thr
 
 When Codex is busy or waiting for approval, ordinary text and project switching are rejected instead of queued. Use `/stop` to interrupt.
 
-## Images
+## Images And Files
 
 Send a WeChat image directly to the bridge. The bridge saves it locally and forwards it to Codex as a `localImage` input.
 
+Send a WeChat file directly to the bridge. The bridge saves it locally and appends the saved local path to the Codex turn text, so Codex can open the file from disk during the task.
+
 If Codex produces an image output with either a saved local path or an HTTP(S) URL, the bridge tries to send a native WeChat image message. If iLink CDN upload fails, it replies with the URL/path as text so the output is not lost.
+
+If a turn creates supported new files inside the active workspace, the bridge detects those new artifacts and sends them back as native WeChat files. Current detection is intentionally conservative: it only picks newly created files with document-like extensions such as `pdf`, `docx`, `xlsx`, `pptx`, `zip`, `csv`, `txt`, `md`, and `html`.
 
 ## Local Data
 
@@ -190,6 +208,7 @@ Files:
 - `config.json`: bridge config.
 - `welcome-state.json`: tracks which owner already received the one-time onboarding message.
 - `assets/YYYY-MM-DD/*`: inbound WeChat images saved for Codex.
+- `assets/YYYY-MM-DD/files/*`: inbound WeChat files saved for Codex.
 - `logs/bridge.log`: redacted runtime logs.
 
 JSON state files are written with current-user-only permissions where the filesystem supports it. Logs redact bearer tokens, bot tokens, and context tokens.
