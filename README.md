@@ -2,7 +2,7 @@
 
 Slim local bridge for personal WeChat iLink messages to `codex app-server`.
 
-Current release: `0.2.8`
+Current release: `0.2.9`
 
 ## What It Does
 
@@ -11,7 +11,7 @@ This project runs a local daemon that receives personal WeChat messages through 
 It is intentionally small:
 
 - One WeChat owner.
-- A whitelist of local projects.
+- Project routing that combines pinned shortcuts with auto-discovered Codex workspaces.
 - One active Codex thread per project.
 - Text-first chat with image input, native image replies, and native file replies for generated workspace artifacts.
 - Inbound WeChat file download and local-path handoff to Codex.
@@ -24,7 +24,7 @@ It is intentionally small:
 - QR-code iLink login and token persistence.
 - Long-poll WeChat receive loop with cursor persistence.
 - Thread commands: create, list, resume, stop.
-- Project commands: list and switch between configured local projects.
+- Project commands: list and switch between pinned or auto-discovered local projects.
 - Streaming Codex replies back to WeChat by paragraph or sentence.
 - Approval prompts in WeChat with `1` for approve and `2` for deny.
 - One-time onboarding message when the bridge first has a usable WeChat reply context.
@@ -45,6 +45,7 @@ It is intentionally small:
   - Detect newly generated workspace artifacts after a turn finishes.
   - Send supported artifacts back as native WeChat files.
   - Fall back to text path if native upload fails.
+  - Current detection is intentionally conservative: only newly created document-like files inside the active workspace are eligible, up to 5 files per turn and 20MB per file.
 - More reliable streaming:
   - Throttle chunk sends to avoid iLink burst failures.
   - Retry transient send failures.
@@ -65,6 +66,8 @@ npm run build
 ```
 
 The build output goes to `dist/`.
+
+If you rebuild a LaunchAgent-managed install, run `launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"` afterward so the running agent reloads the new `dist` files.
 
 ## Setup
 
@@ -138,16 +141,36 @@ launchctl print "gui/$(id -u)/com.codex.wechat-bridge" | rg "state =|pid =|runs 
 
 ## Project Registry
 
-List configured projects:
+List available projects:
 
 ```bash
 node dist/cli.js project list
 ```
 
-Add a project:
+By default the bridge merges three sources:
+
+- `projects.json`: manual project shortcuts.
+- `~/.codex/sessions/**/*.jsonl`: workspaces that Codex has already opened before.
+- Optional extra roots from `config.json`: directories to scan for local repos/apps.
+
+Add a manual project shortcut:
 
 ```bash
 node dist/cli.js project add misc /Users/you/Documents/misc
+```
+
+Optional: add extra discovery roots in `~/.codex-wechat-bridge/config.json` if you want to include projects that have not been opened in Codex yet:
+
+```json
+{
+  "projectDiscovery": {
+    "codexHistory": true,
+    "discoveryRoots": [
+      "/Users/you/Documents/Codex_Project"
+    ],
+    "discoveryMaxDepth": 3
+  }
+}
 ```
 
 In WeChat, switch by index or key:
@@ -156,7 +179,11 @@ In WeChat, switch by index or key:
 项目列表
 项目 2
 项目 misc
+线程列表
+2
 ```
+
+After `项目列表` or `线程列表`, replying with a bare number reuses the most recently shown list context and switches directly. Approval-mode `1` / `2` still keep their existing approve / deny behavior.
 
 The bridge stores one active thread per project, so switching projects restores that project's last active thread when available.
 
@@ -166,10 +193,10 @@ The bridge stores one active thread per project, so switching projects restores 
 | --- | --- |
 | `/help` | Show command help |
 | `/new`, `新线程` | Start a new Codex thread |
-| `/threads`, `/thread`, `线程`, `线程列表` | List recent threads |
+| `/threads`, `/thread`, `线程`, `线程列表` | List recent threads; a follow-up bare number resumes that thread |
 | `/resume <index\|thread_id>` | Resume a thread |
 | `线程 <index\|thread_id>`, `切线程 <index\|thread_id>` | Resume a thread with Chinese alias |
-| `/projects`, `/project`, `项目`, `项目列表` | List configured projects |
+| `/projects`, `/project`, `项目`, `项目列表` | List available projects; a follow-up bare number switches project |
 | `/project <index\|key>`, `项目 <index\|key>` | Switch project |
 | `/status` | Show bridge, project, and thread status |
 | `/stop`, `停下`, `停止` | Interrupt the active turn |
@@ -188,7 +215,7 @@ Send a WeChat file directly to the bridge. The bridge saves it locally and appen
 
 If Codex produces an image output with either a saved local path or an HTTP(S) URL, the bridge tries to send a native WeChat image message. If iLink CDN upload fails, it replies with the URL/path as text so the output is not lost.
 
-If a turn creates supported new files inside the active workspace, the bridge detects those new artifacts and sends them back as native WeChat files. Current detection is intentionally conservative: it only picks newly created files with document-like extensions such as `pdf`, `docx`, `xlsx`, `pptx`, `zip`, `csv`, `txt`, `md`, and `html`.
+If a turn creates supported new files inside the active workspace, the bridge detects those new artifacts and sends them back as native WeChat files. Current detection is intentionally conservative: it only picks newly created files with document-like extensions such as `pdf`, `docx`, `xlsx`, `pptx`, `zip`, `csv`, `txt`, `md`, and `html`, up to 5 files per turn and 20MB per file.
 
 ## Local Data
 
@@ -203,9 +230,9 @@ Files:
 - `account.json`: iLink token and account metadata.
 - `sync_cursor.json`: long-poll cursor.
 - `context_tokens.json`: per-user reply context token.
-- `projects.json`: configured project whitelist.
-- `bridge-state.json`: active project and active thread ids.
-- `config.json`: bridge config.
+- `projects.json`: manual project shortcuts.
+- `bridge-state.json`: active project, per-project active thread ids, and the most recent list context for bare-number switching.
+- `config.json`: bridge config, including optional project discovery roots.
 - `welcome-state.json`: tracks which owner already received the one-time onboarding message.
 - `assets/YYYY-MM-DD/*`: inbound WeChat images saved for Codex.
 - `assets/YYYY-MM-DD/files/*`: inbound WeChat files saved for Codex.
@@ -261,7 +288,7 @@ Send them the source zip, not your runtime data. The recipient should:
 3. Run `npm install && npm run build`.
 4. Run `node dist/cli.js setup --cwd /their/default/workspace`.
 5. Scan the QR code with their own WeChat account.
-6. Add project shortcuts with `node dist/cli.js project add <key> <path>`.
+6. Optional: add manual shortcuts with `node dist/cli.js project add <key> <path>` for names you want to pin or override.
 7. Run the bridge in foreground once with `node dist/cli.js run --cwd /their/default/workspace`.
 8. Send `/status` and `/help` from WeChat to verify the bridge.
 9. Optional: install the LaunchAgent for background/autostart.
