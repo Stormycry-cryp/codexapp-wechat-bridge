@@ -132,12 +132,37 @@ describe("ProgressSender", () => {
     expect(attempts).toBe(3);
   });
 
-  it("splits and resends a chunk when iLink rejects it with ret=-2", async () => {
+  it("does not split ret=-2 rejections into tiny spam chunks", async () => {
+    const attempted: string[] = [];
+    const logger = fakeLogger();
+    const sender = new ProgressSender({
+      send: async (text) => {
+        attempted.push(text);
+        throw new Error("iLink sendmessage failed: ret=-2 errcode=0 errmsg=");
+      },
+      logger,
+      minSendIntervalMs: 0,
+      retryDelaysMs: [],
+      sleep: async () => {}
+    });
+
+    sender.push("ABCDEFGHIJKLMN");
+    await sender.flushAll();
+
+    expect(attempted).toEqual(["ABCDEFGHIJKLMN"]);
+    expect(logger.warn).not.toHaveBeenCalledWith(
+      "retrying progress chunk by splitting",
+      expect.anything()
+    );
+    expect(sender.hasAnyDeliveryFailure()).toBe(true);
+  });
+
+  it("splits and resends a chunk when iLink reports a payload-size rejection", async () => {
     const sent: string[] = [];
     const sender = new ProgressSender({
       send: async (text) => {
         if (text.length > 8) {
-          throw new Error("iLink sendmessage failed: ret=-2 errcode=0 errmsg=");
+          throw new Error("iLink sendmessage failed: ret=-3 errcode=0 errmsg=payload too large");
         }
         sent.push(text);
       },

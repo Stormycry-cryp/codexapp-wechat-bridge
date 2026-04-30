@@ -8,6 +8,7 @@ import { SessionRouter } from "./session-router.js";
 import { Logger } from "./logger.js";
 import { WechatBridgeRunner } from "./wechat/transport.js";
 import { ProjectRegistry, formatProjectLine } from "./projects.js";
+import { acquireProcessLock } from "./process-lock.js";
 
 type CliOptions = {
   dataDir: string;
@@ -89,6 +90,7 @@ async function setup(store: BridgeStore, options: CliOptions): Promise<void> {
 }
 
 async function run(store: BridgeStore, options: CliOptions): Promise<void> {
+  const lock = await acquireProcessLock(options.dataDir);
   const config = {
     ...(await loadConfig(store, options.cwd)),
     dataDir: options.dataDir,
@@ -113,7 +115,11 @@ async function run(store: BridgeStore, options: CliOptions): Promise<void> {
     runner.stop();
     router.shutdown();
   });
-  await runner.runForever();
+  try {
+    await runner.runForever();
+  } finally {
+    await lock.release();
+  }
 }
 
 async function status(store: BridgeStore, options: CliOptions): Promise<void> {

@@ -78,6 +78,7 @@ export type CodexAppServerClientOptions = {
 };
 
 export class CodexAppServerClient implements CodexBridgeClient {
+  private static readonly INTENTIONAL_SHUTDOWN_MESSAGE = "Codex app-server stopped because the bridge is shutting down.";
   private child: ChildProcessWithoutNullStreams | null = null;
   private rpc: JsonLineRpcClient | null = null;
   private currentStatus: CodexBridgeStatus = { state: "disconnected" };
@@ -94,6 +95,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
   private activeOutputChain: Promise<void> = Promise.resolve();
   private activeWorkspaceSnapshot: WorkspaceArtifactSnapshot = new Map();
   private pendingApproval: PendingApproval | null = null;
+  private shuttingDown = false;
 
   constructor(private readonly options: CodexAppServerClientOptions) {}
 
@@ -103,6 +105,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
 
   async start(): Promise<void> {
     if (this.rpc) return;
+    this.shuttingDown = false;
     this.child = spawn(this.options.command ?? defaultCodexCommand(), this.options.args ?? ["app-server"], {
       stdio: ["pipe", "pipe", "pipe"],
       cwd: this.options.cwd,
@@ -114,6 +117,11 @@ export class CodexAppServerClient implements CodexBridgeClient {
     this.child.on("close", () => {
       this.currentStatus = { state: "disconnected" };
       this.rpc = null;
+      this.child = null;
+      if (this.shuttingDown) {
+        this.shuttingDown = false;
+        return;
+      }
       this.finishTurn(new Error("Codex app-server disconnected before the turn completed."));
     });
     this.child.stderr.on("data", () => {});
@@ -169,6 +177,11 @@ export class CodexAppServerClient implements CodexBridgeClient {
     this.activeWorkspaceSnapshot = await snapshotWorkspaceArtifacts(this.options.cwd);
     this.activeThreadId = threadId;
     this.currentStatus = { state: "busy", activeThreadId: threadId };
+    const turnCompletion = new Promise<string>((resolve, reject) => {
+      this.activeWaiter = resolve;
+      this.activeRejecter = reject;
+      this.armTurnIdleTimer();
+    });
     try {
       const result = await this.request<{ turn: { id: string } }>("turn/start", {
         threadId,
@@ -177,12 +190,11 @@ export class CodexAppServerClient implements CodexBridgeClient {
         approvalsReviewer: "user",
         input: buildTurnInput(text, images, files)
       });
-      this.activeTurnId = result.turn.id;
-      return await new Promise<string>((resolve, reject) => {
-        this.activeWaiter = resolve;
-        this.activeRejecter = reject;
-        this.armTurnIdleTimer();
-      });
+      if (this.activeWaiter) {
+        this.activeTurnId = result.turn.id;
+        this.currentStatus = { state: "busy", activeThreadId: threadId, activeTurnId: this.activeTurnId };
+      }
+      return await turnCompletion;
     } catch (error) {
       this.currentStatus = { state: "idle", activeThreadId: this.activeThreadId || threadId };
       this.resetActiveTurnState();
@@ -222,6 +234,10 @@ export class CodexAppServerClient implements CodexBridgeClient {
   }
 
   shutdown(): void {
+    this.shuttingDown = true;
+    if (this.activeWaiter) {
+      this.finishTurn(new Error(CodexAppServerClient.INTENTIONAL_SHUTDOWN_MESSAGE));
+    }
     this.child?.kill("SIGTERM");
   }
 
@@ -356,7 +372,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
   }
 
   private noteTurnActivity(): void {
-    if (!this.activeWaiter || !this.activeTurnId) return;
+    if (!this.activeWaiter) return;
     if (this.currentStatus.state !== "busy" && this.currentStatus.state !== "awaiting_approval") return;
     this.armTurnIdleTimer();
   }

@@ -59,6 +59,7 @@ It is intentionally small:
   - Split oversized chunks before or after `ret=-2` rejections so replies do not get cut off halfway.
   - Route final plain-text replies, streamed-reply fallbacks, and native media text fallbacks through the same split-and-retry path.
   - If a streamed chunk still cannot be delivered completely after split retries, send the complete final reply as a fallback so partial bubbles do not hide the rest of the answer.
+  - If one `context_token` runs out of reply-budget before the whole reply fits, pause at a safe boundary, ask the user to reply `1`, and continue only the remaining tail on the next reply token without sending that `1` into Codex; once that continuation finishes, send `Codex 已完成。`.
 
 ## Requirements
 
@@ -194,9 +195,11 @@ In WeChat, switch by index or key:
 2
 ```
 
-After `项目列表` or `线程列表`, replying with a bare number reuses the most recently shown list context and switches directly. Approval-mode `1` / `2` still keep their existing approve / deny behavior.
+After `项目列表` or `线程列表`, replying with a bare number reuses the list context saved for that display and switches directly. Approval-mode `1` / `2` still keep their existing approve / deny behavior.
 
-The bridge stores one active thread per project, so switching projects restores that project's last active thread when available.
+When a long reply is truncated because the current WeChat reply context is exhausted, the bridge may instead send `回复 1 继续`. In that specific state, a plain `1` does not go to Codex; it only resumes the remaining tail of the reply on the next `context_token`, and once that continuation finishes the bridge sends `Codex 已完成。`. If the bridge is awaiting approval, approve / deny still take priority. If the bridge restarts or the continuation sits idle for more than 2 hours, that continuation state expires and must be restarted with a fresh user request.
+
+The bridge stores one active thread per project, so switching projects restores that project's saved active thread when available.
 
 ## WeChat Commands
 
@@ -204,7 +207,7 @@ The bridge stores one active thread per project, so switching projects restores 
 | --- | --- |
 | `/help` | Show command help |
 | `/new`, `新线程` | Start a new Codex thread |
-| `/threads`, `/thread`, `线程`, `线程列表` | List recent threads; a follow-up bare number resumes that thread |
+| `/threads`, `/thread`, `线程`, `线程列表` | List available threads; a follow-up bare number resumes that thread |
 | `/resume <index\|thread_id>` | Resume a thread |
 | `线程 <index\|thread_id>`, `切线程 <index\|thread_id>` | Resume a thread with Chinese alias |
 | `/projects`, `/project`, `项目`, `项目列表` | List available projects; a follow-up bare number switches project |
@@ -216,6 +219,8 @@ The bridge stores one active thread per project, so switching projects restores 
 | `/deny`, `2` | Deny a pending Codex request |
 
 Plain text is sent to the active thread in the current project. If no active thread exists, the bridge starts or resumes one automatically.
+
+Special case: if the previous reply explicitly said `回复 1 继续`, then a bare `1` resumes that pending WeChat-only continuation instead of entering Codex as user text. This continuation-only `1` is ignored when Codex is awaiting approval, so approval shortcuts keep working.
 
 When Codex is busy or waiting for approval, ordinary text and project switching are rejected instead of queued. Use `/stop` to interrupt.
 

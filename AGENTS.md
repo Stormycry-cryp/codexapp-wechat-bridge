@@ -35,3 +35,8 @@
 - Final plain-text replies and media text fallbacks should go through the same reliable split/retry path as streamed chunks.
 - If any progress chunk is ultimately undeliverable, `WechatBridgeRunner` now sends a complete final-reply fallback: `流式回传不完整，下面是完整回复：...`.
 - Do not remove that fallback just because some partial chunks already reached WeChat; that is the exact truncation case it prevents.
+- When a single `context_token` still cannot carry the complete reply, the bridge now pauses at a safe boundary and asks the user to reply `1` to continue.
+- When that continuation path is triggered by local WeChat reply-budget exhaustion, it should continue only the unsent tail instead of replaying the whole final reply from the beginning.
+- After that continuation finishes, the bridge should send a final `Codex 已完成。` notice so WeChat still gets an explicit completion signal.
+- That continuation-only `1` is intercepted in `src/wechat/transport.ts` and must not be forwarded into Codex as ordinary user text.
+- Approval-mode `1` / `2` still take priority over continuation handling, and continuation state currently lives in memory only with a 2-hour TTL.

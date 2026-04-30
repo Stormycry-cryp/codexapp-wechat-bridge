@@ -22,6 +22,31 @@ describe("IlinkApiClient", () => {
     expect(JSON.parse(init.body).get_updates_buf).toBe("cursor");
   });
 
+  it("uses a stable WeChat UIN header for every request from the same client", async () => {
+    const uins: string[] = [];
+    const clientIds: string[] = [];
+    const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
+      uins.push(String(init?.headers?.["X-WECHAT-UIN"]));
+      if (url === "https://ilink.example/ilink/bot/sendmessage") {
+        const body = JSON.parse(String(init?.body));
+        clientIds.push(body.msg.client_id);
+      }
+      return new Response(JSON.stringify({ ret: 0, msgs: [] }));
+    });
+    const client = new IlinkApiClient({
+      baseUrl: "https://ilink.example",
+      token: "secret-token",
+      fetchImpl
+    });
+
+    await client.getUpdates("cursor", 10);
+    await client.sendText("user@im.wechat", "one", "ctx", "client-one");
+    await client.sendText("user@im.wechat", "two", "ctx", "client-two");
+
+    expect(new Set(uins).size).toBe(1);
+    expect(clientIds).toEqual(["client-one", "client-two"]);
+  });
+
   it("uploads and sends native WeChat image messages", async () => {
     const fetchImpl = vi.fn(async (url: string, init?: RequestInit) => {
       if (url === "https://ilink.example/ilink/bot/getuploadurl") {

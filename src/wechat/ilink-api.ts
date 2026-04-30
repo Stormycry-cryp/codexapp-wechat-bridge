@@ -24,6 +24,7 @@ export class IlinkApiClient {
   private readonly token: string;
   private readonly routeTag: string;
   private readonly fetchImpl: FetchLike;
+  private readonly wechatUin: string;
 
   constructor(options: IlinkApiClientOptions = {}) {
     this.baseUrl = (options.baseUrl || "https://ilinkai.weixin.qq.com").replace(/\/+$/, "");
@@ -31,6 +32,7 @@ export class IlinkApiClient {
     this.token = options.token?.trim() ?? "";
     this.routeTag = options.routeTag?.trim() ?? "";
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.wechatUin = randomWechatUin();
   }
 
   async getBotQrCode(botType = "3"): Promise<{ qrcode: string; qrcode_img_content: string }> {
@@ -243,7 +245,7 @@ export class IlinkApiClient {
       Object.assign(headers, extra);
     }
     headers.AuthorizationType = "ilink_bot_token";
-    headers["X-WECHAT-UIN"] = randomWechatUin();
+    headers["X-WECHAT-UIN"] = this.wechatUin;
     if (this.token) headers.Authorization = `Bearer ${this.token}`;
     if (this.routeTag) headers.SKRouteTag = this.routeTag;
     return headers;
