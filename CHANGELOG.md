@@ -10,6 +10,13 @@
   - Sends one hourly keepalive notice during long silent stretches so WeChat users can tell the task is still running.
   - Routes final plain-text replies and fallback text through the same split-and-retry delivery path as streamed chunks.
   - Serializes outbound text, image, and file sends per WeChat user so streamed chunks and native media replies do not overlap and trigger iLink `ret=-2` rejections.
+- Added WeChat continuation-on-`1` fallback for reply-context exhaustion:
+  - If the current `context_token` cannot carry the whole reply, the bridge now stops at a safe boundary and prompts `回复 1 继续`.
+  - A continuation-only `1` no longer enters Codex as model input; it reuses the new reply token to send only the unsent tail from the bridge, then appends `Codex 已完成。` after the continuation finishes.
+  - Approval-mode `1` / `2` still keep priority, expired continuation state now reports a clear retry message, and the continuation state TTL is 2 hours.
+- Improved restart/continuation observability:
+  - Intentional bridge shutdowns no longer surface as misleading `Codex app-server disconnected before the turn completed.` errors.
+  - Bridge logs now record when a reply continuation is queued and when that continuation finishes.
 
 ## 0.2.10 - 2026-04-29
 
@@ -24,8 +31,8 @@
   - Supports optional `projectDiscovery.discoveryRoots` scanning from `config.json`.
   - Normalizes historical `cwd` values upward to project roots so non-project paths are filtered out.
 - Added WeChat bare-number list shortcuts:
-  - After `线程列表`, replying with a bare number resumes the matching thread from the most recently shown list.
-  - After `项目列表`, replying with a bare number switches to the matching project from the most recently shown list.
+  - After `线程列表`, replying with a bare number resumes the matching thread from the list context saved for that display.
+  - After `项目列表`, replying with a bare number switches to the matching project from the list context saved for that display.
   - Approval-mode `1` / `2` still keep higher priority for approve / deny.
 - Added inbound WeChat file support:
   - Parses `file_item` media references from iLink updates.

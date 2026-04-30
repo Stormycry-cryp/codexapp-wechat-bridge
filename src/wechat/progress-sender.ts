@@ -12,11 +12,18 @@ export type ProgressSenderOptions = {
   now?: () => number;
 };
 
+export type ChunkTextForWechatOptions = {
+  maxMessageLength?: number;
+};
+
 export class ProgressSender {
   private buffer = "";
   private streamedOutput = false;
   private deliveryFailed = false;
   private anyDeliveryFailed = false;
+  private terminalDeliveryFailed = false;
+  private stopped = false;
+  private successfulProgressChunkCount = 0;
   private queue: Promise<void> = Promise.resolve();
   private readonly maxMessageLength: number;
   private readonly minSendIntervalMs: number;
@@ -43,6 +50,18 @@ export class ProgressSender {
 
   hasAnyDeliveryFailure(): boolean {
     return this.anyDeliveryFailed;
+  }
+
+  hasTerminalDeliveryFailure(): boolean {
+    return this.terminalDeliveryFailed;
+  }
+
+  hasLocalStopFailure(): boolean {
+    return this.stopped;
+  }
+
+  successfulProgressChunks(): number {
+    return this.successfulProgressChunkCount;
   }
 
   sendNotice(text: string): Promise<void> {
@@ -165,6 +184,15 @@ export class ProgressSender {
   private async deliver(text: string, countsAsProgress: boolean): Promise<void> {
     const trimmed = text.trim();
     if (!trimmed) return;
+    if (this.terminalDeliveryFailed || this.stopped) {
+      this.anyDeliveryFailed = true;
+      if (countsAsProgress) this.deliveryFailed = true;
+      await this.options.logger.warn("skipping progress chunk after terminal send failure", {
+        length: trimmed.length,
+        preview: trimmed.slice(0, 120)
+      });
+      return;
+    }
     const sent = await this.tryDeliver(trimmed, countsAsProgress);
     if (!sent) {
       this.anyDeliveryFailed = true;
@@ -179,7 +207,10 @@ export class ProgressSender {
   private async tryDeliver(text: string, countsAsProgress: boolean): Promise<boolean> {
     const sendResult = await this.sendWithRetry(text);
     if (sendResult === true) {
-      if (countsAsProgress) this.streamedOutput = true;
+      if (countsAsProgress) {
+        this.streamedOutput = true;
+        this.successfulProgressChunkCount += 1;
+      }
       return true;
     }
 
@@ -187,6 +218,13 @@ export class ProgressSender {
       error: sendResult,
       length: text.length
     });
+
+    if (isTerminalSendFailure(sendResult)) {
+      this.terminalDeliveryFailed = true;
+    }
+    if (isLocalSendStopFailure(sendResult)) {
+      this.stopped = true;
+    }
 
     if (!shouldSplitAfterFailure(sendResult, text)) {
       return false;
@@ -246,6 +284,25 @@ export class ProgressSender {
   private markSendWindow(): void {
     this.nextSendAllowedAt = this.now() + this.minSendIntervalMs;
   }
+}
+
+export async function chunkTextForWechat(text: string, options: ChunkTextForWechatOptions = {}): Promise<string[]> {
+  const chunks: string[] = [];
+  const sender = new ProgressSender({
+    send: async (chunk) => {
+      chunks.push(chunk);
+    },
+    logger: {
+      warn: async () => {}
+    },
+    maxMessageLength: options.maxMessageLength,
+    minSendIntervalMs: 0,
+    retryDelaysMs: [],
+    sleep: async () => {}
+  });
+  sender.push(text);
+  await sender.flushAll();
+  return chunks;
 }
 
 const MIN_STREAM_CHUNK_LENGTH = 6;
@@ -310,15 +367,21 @@ function isRetryableSendFailure(errorText: string): boolean {
   return normalized.includes("fetch failed")
     || normalized.includes("aborted")
     || normalized.includes("timeout")
-    || normalized.includes("http 5")
-    || normalized.includes("ret=-2");
+    || normalized.includes("http 5");
+}
+
+function isTerminalSendFailure(errorText: string): boolean {
+  return errorText.toLowerCase().includes("ret=-2");
+}
+
+function isLocalSendStopFailure(errorText: string): boolean {
+  return errorText.toLowerCase().includes("context send budget reached");
 }
 
 function shouldSplitAfterFailure(errorText: string, text: string): boolean {
   if (text.length <= 1) return false;
   const normalized = errorText.toLowerCase();
-  return normalized.includes("ret=-2")
-    || normalized.includes("parameter")
+  return normalized.includes("parameter")
     || normalized.includes("too large")
     || normalized.includes("payload");
 }

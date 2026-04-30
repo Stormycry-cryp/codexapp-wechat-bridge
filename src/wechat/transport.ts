@@ -1,4 +1,5 @@
 import { randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname } from "node:path";
 import { join } from "node:path";
@@ -13,7 +14,7 @@ import type { SessionRouter } from "../session-router.js";
 import { IlinkApiClient } from "./ilink-api.js";
 import { detectImageMime, imageExtensionForMime } from "./media.js";
 import { toInboundWechatMessage } from "./message.js";
-import { ProgressSender } from "./progress-sender.js";
+import { chunkTextForWechat, ProgressSender } from "./progress-sender.js";
 import type { InboundWechatMessage, WechatCdnRef, WechatFileRef } from "./types.js";
 
 type ContextTokenMap = Record<string, string>;
@@ -25,6 +26,12 @@ type WelcomeState = {
 const WELCOME_MESSAGE_VERSION = 2;
 const LONG_TASK_KEEPALIVE_INTERVAL_MS = 60 * 60_000;
 const LONG_TASK_KEEPALIVE_MESSAGE = "任务仍在处理中，暂无新进展；/stop 可中断。";
+const WECHAT_CONTEXT_MAX_SENDS = 10;
+const WECHAT_CONTEXT_RESERVED_TAIL_SENDS = 6;
+const WECHAT_CONTEXT_BUDGET_EXCEEDED = "wechat context send budget reached";
+const CONTINUATION_PROMPT_MESSAGE = "回复 1 继续";
+const CONTINUATION_EXPIRED_MESSAGE = "上一轮续写状态已失效，请重新提问。";
+const CONTINUATION_STATE_TTL_MS = 2 * 60 * 60_000;
 
 export type WechatBridgeRunnerOptions = {
   config: BridgeConfig;
@@ -32,6 +39,8 @@ export type WechatBridgeRunnerOptions = {
   store: BridgeStore;
   router: SessionRouter;
   logger: Logger;
+  progressSendIntervalMs?: number;
+  reliableSendIntervalMs?: number;
 };
 
 type InboundAttachmentSaveOptions<TRef extends WechatCdnRef, TOutput> = {
@@ -41,11 +50,32 @@ type InboundAttachmentSaveOptions<TRef extends WechatCdnRef, TOutput> = {
   toOutput: (target: string, ref: TRef) => TOutput;
 };
 
+type DeliveryContext = {
+  userId: string;
+  contextToken: string;
+  messageId: string;
+  startedAt: number;
+  degraded: boolean;
+  sentMessageCount: number;
+  budgetStopLogged: boolean;
+};
+
+type DeliveryPhase = "notice" | "stream" | "fallback" | "completion" | "media-fallback";
+
+type PendingContinuationState = {
+  sourceMessageId: string;
+  pendingChunks: string[];
+  createdAt: number;
+  updatedAt: number;
+};
+
 export class WechatBridgeRunner {
   private stopping = false;
   private readonly api: IlinkApiClient;
   private readonly seen = new Map<string, number>();
+  private readonly inboundQueues = new Map<string, Promise<void>>();
   private readonly outboundQueues = new Map<string, Promise<void>>();
+  private readonly pendingContinuations = new Map<string, PendingContinuationState>();
 
   constructor(private readonly options: WechatBridgeRunnerOptions) {
     this.api = new IlinkApiClient({
@@ -89,20 +119,37 @@ export class WechatBridgeRunner {
     if (response.errcode === -14) {
       throw new WechatTokenExpiredError("WeChat iLink token expired; run setup again.");
     }
-    if (response.get_updates_buf) {
-      await this.options.store.writeJson("sync_cursor.json", { cursor: response.get_updates_buf });
-    }
-
+    const handled: Promise<void>[] = [];
     for (const raw of response.msgs ?? []) {
       const message = toInboundWechatMessage(raw);
       if (!message || this.isDuplicate(message)) continue;
-      void this.handleMessage(message).catch(async (error) => {
+      const handledMessage = this.handleMessage(message).catch(async (error) => {
         await this.options.logger.error("message handling failed", error);
       });
+      handled.push(handledMessage);
+      void handledMessage;
+    }
+
+    if (response.get_updates_buf) {
+      if (handled.length === 0) {
+        await this.options.store.writeJson("sync_cursor.json", { cursor: response.get_updates_buf });
+      } else {
+        void Promise.allSettled(handled).then(async () => {
+          await this.options.store.writeJson("sync_cursor.json", { cursor: response.get_updates_buf });
+        }).catch(async (error) => {
+          await this.options.logger.warn("failed to advance sync cursor after handling messages", describeError(error));
+        });
+      }
     }
   }
 
   private async handleMessage(message: InboundWechatMessage): Promise<void> {
+    await this.enqueueInbound(message.userId, async () => {
+      await this.handleMessageNow(message);
+    });
+  }
+
+  private async handleMessageNow(message: InboundWechatMessage): Promise<void> {
     if (!(await this.isAllowedOwner(message.userId))) {
       await this.options.logger.warn("rejected message from non-owner", { userId: message.userId });
       return;
@@ -114,12 +161,28 @@ export class WechatBridgeRunner {
       await this.options.store.writeJson("context_tokens.json", tokens);
     }
 
-    const token = message.contextToken || (await this.options.store.readJson<ContextTokenMap>("context_tokens.json", {}))[message.userId];
-    if (!token) {
+    const contextToken = message.contextToken || (await this.options.store.readJson<ContextTokenMap>("context_tokens.json", {}))[message.userId];
+    if (!contextToken) {
       await this.options.logger.warn("missing context token; cannot reply", { userId: message.userId });
       return;
     }
-    await this.maybeSendWelcome(message.userId, token);
+
+    if (await this.tryHandleContinuationShortcut(message, contextToken)) {
+      return;
+    }
+    if (this.hasPendingContinuation(message.userId) && !this.isPureContinueRequest(message)) {
+      this.clearPendingContinuation(message.userId);
+    }
+    const delivery: DeliveryContext = {
+      userId: message.userId,
+      contextToken,
+      messageId: message.id,
+      startedAt: Date.now(),
+      degraded: false,
+      sentMessageCount: 0,
+      budgetStopLogged: false
+    };
+    await this.maybeSendWelcome(delivery);
 
     await this.options.logger.info("received wechat text", {
       userId: message.userId,
@@ -130,7 +193,7 @@ export class WechatBridgeRunner {
       fileCount: message.files?.length ?? 0
     });
 
-    const progress = this.createProgressSender(message.userId, token);
+    const progress = this.createProgressSender(message.userId, contextToken, delivery, "stream");
     const longTaskKeepalive = this.createLongTaskKeepalive(progress);
     const images = await this.saveInboundImages(message);
     const files = await this.saveInboundFiles(message);
@@ -162,12 +225,12 @@ export class WechatBridgeRunner {
         },
         onImageOutput: async (output) => {
           longTaskKeepalive.markActivity();
-          await this.sendImageOutput(message.userId, token, output);
+          await this.sendImageOutput(delivery, output);
           deliveredNativeOutput = true;
         },
         onFileOutput: async (output) => {
           longTaskKeepalive.markActivity();
-          await this.sendFileOutput(message.userId, token, output);
+          await this.sendFileOutput(delivery, output);
           deliveredNativeOutput = true;
         }
       });
@@ -179,38 +242,140 @@ export class WechatBridgeRunner {
     }
 
     await progress.flushAll();
+    if (typeof progress.hasTerminalDeliveryFailure === "function" && progress.hasTerminalDeliveryFailure()) {
+      delivery.degraded = true;
+    }
     let sentIncompleteFallback = false;
-    if (progress.hasDeliveryFailure() && reply) {
-      await this.sendTextReliably(message.userId, token, `流式回传不完整，下面是完整回复：\n\n${reply}`);
-      sentIncompleteFallback = true;
+    if ((delivery.degraded || progress.hasDeliveryFailure()) && reply) {
+      if (typeof progress.hasLocalStopFailure === "function" && progress.hasLocalStopFailure() && progress.hasStreamedOutput()) {
+        const remainingReplyChunks = await this.remainingReplyChunks(progress, reply);
+        if (remainingReplyChunks.length > 0) {
+          sentIncompleteFallback = await this.sendChunkSequenceWithContinuation(
+            delivery,
+            remainingReplyChunks,
+            "fallback",
+            delivery.messageId,
+            "Codex 已完成。"
+          );
+        } else {
+          sentIncompleteFallback = true;
+        }
+      } else {
+        sentIncompleteFallback = await this.sendTextWithContinuation(
+          delivery,
+          `流式回传不完整，下面是完整回复：\n\n${reply}`,
+          "fallback"
+        );
+      }
+      if (!sentIncompleteFallback) {
+        return;
+      }
+    }
+    if (delivery.degraded) {
+      return;
     }
     if (progress.hasStreamedOutput()) {
       await progress.sendNotice("Codex 已完成。");
     } else if (reply && !sentIncompleteFallback && !(deliveredNativeOutput && reply === "(Codex completed without text output.)")) {
-      await this.sendTextReliably(message.userId, token, reply);
+      const completed = await this.sendTextWithContinuation(delivery, reply, "fallback");
+      if (!completed) {
+        return;
+      }
     }
   }
 
-  private createProgressSender(userId: string, contextToken: string): ProgressSender {
+  private createProgressSender(userId: string, contextToken: string, delivery?: DeliveryContext, phase: DeliveryPhase = "stream"): ProgressSender {
+    const context = delivery ?? {
+      userId,
+      contextToken,
+      messageId: "",
+      startedAt: Date.now(),
+      degraded: false,
+      sentMessageCount: 0,
+      budgetStopLogged: false
+    } satisfies DeliveryContext;
     return new ProgressSender({
-      send: (text) => this.sendText(userId, contextToken, text),
-      logger: this.options.logger
+      send: (text) => this.sendText(context, text, phase),
+      logger: this.options.logger,
+      minSendIntervalMs: this.options.progressSendIntervalMs
     });
   }
 
-  private async sendText(userId: string, contextToken: string, text: string): Promise<void> {
-    await this.enqueueOutbound(userId, async () => {
-      await this.api.sendText(userId, text, contextToken, `cwb-${randomBytes(6).toString("hex")}`);
+  private async sendText(delivery: DeliveryContext, text: string, phase: DeliveryPhase): Promise<void>;
+  private async sendText(userId: string, contextToken: string, text: string): Promise<void>;
+  private async sendText(deliveryOrUserId: DeliveryContext | string, textOrContextToken: string, phaseOrText: DeliveryPhase | string): Promise<void> {
+    const delivery = typeof deliveryOrUserId === "string"
+      ? {
+          userId: deliveryOrUserId,
+          contextToken: textOrContextToken,
+          messageId: "",
+          startedAt: Date.now(),
+          degraded: false,
+          sentMessageCount: 0,
+          budgetStopLogged: false
+        } satisfies DeliveryContext
+      : deliveryOrUserId;
+    const text = typeof deliveryOrUserId === "string" ? phaseOrText : textOrContextToken;
+    const phase = typeof deliveryOrUserId === "string" ? "stream" : phaseOrText as DeliveryPhase;
+    this.assertSendBudget(delivery, phase, text.length);
+    await this.enqueueOutbound(delivery.userId, async () => {
+      const clientId = `cwb-${randomBytes(6).toString("hex")}`;
+      try {
+        await this.api.sendText(delivery.userId, text, delivery.contextToken, clientId);
+        this.noteSuccessfulSend(delivery);
+      } catch (error) {
+        await this.logSendFailure(delivery, phase, text, clientId, error);
+        throw error;
+      }
     });
   }
 
-  private async sendTextReliably(userId: string, contextToken: string, text: string): Promise<void> {
-    const sender = this.createProgressSender(userId, contextToken);
-    await sender.sendNotice(text);
-    await sender.settle();
+  private async sendTextReliably(delivery: DeliveryContext, text: string, phase: DeliveryPhase): Promise<void>;
+  private async sendTextReliably(userId: string, contextToken: string, text: string): Promise<void>;
+  private async sendTextReliably(deliveryOrUserId: DeliveryContext | string, textOrContextToken: string, phaseOrText: DeliveryPhase | string): Promise<void> {
+    const delivery = typeof deliveryOrUserId === "string"
+      ? {
+          userId: deliveryOrUserId,
+          contextToken: textOrContextToken,
+          messageId: "",
+          startedAt: Date.now(),
+          degraded: false,
+          sentMessageCount: 0,
+          budgetStopLogged: false
+        } satisfies DeliveryContext
+      : deliveryOrUserId;
+    const text = typeof deliveryOrUserId === "string" ? phaseOrText : textOrContextToken;
+    const phase = typeof deliveryOrUserId === "string" ? "fallback" : phaseOrText as DeliveryPhase;
+    const sender = new ProgressSender({
+      send: (chunk) => this.sendText(delivery, chunk, phase),
+      logger: this.options.logger,
+      minSendIntervalMs: this.options.reliableSendIntervalMs ?? 400
+    });
+    sender.push(text);
+    await sender.flushAll();
+    if (sender.hasTerminalDeliveryFailure()) {
+      delivery.degraded = true;
+    }
     if (sender.hasAnyDeliveryFailure()) {
       throw new Error("failed to fully deliver text reply");
     }
+  }
+
+  private async sendTextWithContinuation(delivery: DeliveryContext, text: string, phase: DeliveryPhase): Promise<boolean> {
+    const chunks = await chunkTextForWechat(text);
+    const remainingSlots = WECHAT_CONTEXT_MAX_SENDS - delivery.sentMessageCount;
+    if (chunks.length <= remainingSlots) {
+      await this.sendTextReliably(delivery, text, phase);
+      this.clearPendingContinuation(delivery.userId);
+      return true;
+    }
+    return await this.sendChunkSequenceWithContinuation(delivery, chunks, phase, delivery.messageId);
+  }
+
+  private async remainingReplyChunks(progress: ProgressSender, reply: string): Promise<string[]> {
+    const chunks = await chunkTextForWechat(reply);
+    const successfulChunks = progress.successfulProgressChunks();
+    return chunks.slice(successfulChunks);
   }
 
   private async sendStartupWelcomeIfPossible(): Promise<void> {
@@ -219,46 +384,82 @@ export class WechatBridgeRunner {
     const tokens = await this.options.store.readJson<ContextTokenMap>("context_tokens.json", {});
     const token = tokens[owner];
     if (!token) return;
-    await this.maybeSendWelcome(owner, token);
+    await this.maybeSendWelcome({
+      userId: owner,
+      contextToken: token,
+      messageId: "startup",
+      startedAt: Date.now(),
+      degraded: false,
+      sentMessageCount: 0,
+      budgetStopLogged: false
+    });
   }
 
-  private async maybeSendWelcome(userId: string, contextToken: string): Promise<void> {
+  private async maybeSendWelcome(delivery: DeliveryContext): Promise<void>;
+  private async maybeSendWelcome(userId: string, contextToken: string): Promise<void>;
+  private async maybeSendWelcome(deliveryOrUserId: DeliveryContext | string, contextToken?: string): Promise<void> {
+    const baseDelivery = typeof deliveryOrUserId === "string"
+      ? {
+          userId: deliveryOrUserId,
+          contextToken: contextToken ?? "",
+          messageId: "welcome",
+          startedAt: Date.now(),
+          degraded: false,
+          sentMessageCount: 0,
+          budgetStopLogged: false
+        } satisfies DeliveryContext
+      : deliveryOrUserId;
     const state = await this.options.store.readJson<WelcomeState>("welcome-state.json", {});
-    if (welcomeVersionForUser(state, userId) >= WELCOME_MESSAGE_VERSION) return;
-    await this.sendTextReliably(userId, contextToken, welcomeMessage());
+    if (welcomeVersionForUser(state, baseDelivery.userId) >= WELCOME_MESSAGE_VERSION) return;
+    const welcomeDelivery: DeliveryContext = {
+      userId: baseDelivery.userId,
+      contextToken: baseDelivery.contextToken,
+      messageId: "welcome",
+      startedAt: Date.now(),
+      degraded: false,
+      sentMessageCount: 0,
+      budgetStopLogged: false
+    };
+    await this.sendTextReliably(welcomeDelivery, welcomeMessage(), "notice");
     await this.options.store.writeJson("welcome-state.json", {
       version: WELCOME_MESSAGE_VERSION,
       sentTo: {
         ...(state.sentTo ?? {}),
-        [userId]: WELCOME_MESSAGE_VERSION
+        [baseDelivery.userId]: WELCOME_MESSAGE_VERSION
       }
     });
   }
 
-  private async sendImageOutput(userId: string, contextToken: string, output: CodexImageOutput): Promise<void> {
+  private async sendImageOutput(delivery: DeliveryContext, output: CodexImageOutput): Promise<void> {
+    if (delivery.degraded) return;
     try {
       const bytes = await this.loadOutputImageBytes(output);
-      await this.sendImage(userId, contextToken, bytes);
+      await this.sendImage(delivery, bytes);
     } catch (error) {
       await this.options.logger.warn("failed to send native wechat image output", {
         error: describeError(error),
         hasPath: Boolean(output.path),
         hasUrl: Boolean(output.url)
       });
-      await this.sendTextReliably(userId, contextToken, output.fallbackText);
+      if (!delivery.degraded) {
+        await this.sendTextReliably(delivery, output.fallbackText, "media-fallback");
+      }
     }
   }
 
-  private async sendFileOutput(userId: string, contextToken: string, output: CodexFileOutput): Promise<void> {
+  private async sendFileOutput(delivery: DeliveryContext, output: CodexFileOutput): Promise<void> {
+    if (delivery.degraded) return;
     try {
       const bytes = await readFile(output.path);
-      await this.sendFile(userId, contextToken, fileNameFromPath(output.path), bytes);
+      await this.sendFile(delivery, fileNameFromPath(output.path), bytes);
     } catch (error) {
       await this.options.logger.warn("failed to send native wechat file output", {
         error: describeError(error),
         path: output.path
       });
-      await this.sendTextReliably(userId, contextToken, output.fallbackText);
+      if (!delivery.degraded) {
+        await this.sendTextReliably(delivery, output.fallbackText, "media-fallback");
+      }
     }
   }
 
@@ -308,16 +509,310 @@ export class WechatBridgeRunner {
     throw new Error("image output has neither path nor url");
   }
 
-  private async sendImage(userId: string, contextToken: string, bytes: Buffer): Promise<void> {
-    await this.enqueueOutbound(userId, async () => {
-      await this.api.sendImage(userId, bytes, contextToken, `cwb-img-${randomBytes(6).toString("hex")}`);
+  private async sendImage(delivery: DeliveryContext, bytes: Buffer): Promise<void> {
+    await this.enqueueOutbound(delivery.userId, async () => {
+      this.assertSendBudget(delivery, "fallback", bytes.length);
+      const clientId = `cwb-img-${randomBytes(6).toString("hex")}`;
+      try {
+        await this.api.sendImage(delivery.userId, bytes, delivery.contextToken, clientId);
+        this.noteSuccessfulSend(delivery);
+      } catch (error) {
+        await this.logSendFailure(delivery, "stream", `[image:${bytes.length}]`, clientId, error);
+        throw error;
+      }
     });
   }
 
-  private async sendFile(userId: string, contextToken: string, fileName: string, bytes: Buffer): Promise<void> {
-    await this.enqueueOutbound(userId, async () => {
-      await this.api.sendFile(userId, fileName, bytes, contextToken, `cwb-file-${randomBytes(6).toString("hex")}`);
+  private async sendFile(delivery: DeliveryContext, fileName: string, bytes: Buffer): Promise<void> {
+    await this.enqueueOutbound(delivery.userId, async () => {
+      this.assertSendBudget(delivery, "fallback", bytes.length);
+      const clientId = `cwb-file-${randomBytes(6).toString("hex")}`;
+      try {
+        await this.api.sendFile(delivery.userId, fileName, bytes, delivery.contextToken, clientId);
+        this.noteSuccessfulSend(delivery);
+      } catch (error) {
+        await this.logSendFailure(delivery, "stream", `[file:${fileName}:${bytes.length}]`, clientId, error);
+        throw error;
+      }
     });
+  }
+
+  private async logSendFailure(delivery: DeliveryContext, phase: DeliveryPhase, text: string, clientId: string, error: unknown): Promise<void> {
+    const message = describeError(error);
+    if (message.includes("ret=-2")) {
+      delivery.degraded = true;
+    }
+    await this.options.logger.warn("wechat send failed", {
+      ...this.deliveryLogMeta(delivery, phase),
+      clientId,
+      textLength: text.length,
+      error: message,
+      suspectedStaleContext: message.includes("ret=-2") && Date.now() - delivery.startedAt >= 60_000
+    });
+  }
+
+  private deliveryLogMeta(delivery: DeliveryContext, phase: DeliveryPhase): Record<string, unknown> {
+    return {
+      userId: delivery.userId,
+      messageId: delivery.messageId,
+      phase,
+      contextTokenHash: shortHash(delivery.contextToken),
+      turnAgeMs: Date.now() - delivery.startedAt,
+      degraded: delivery.degraded,
+      sentMessageCount: delivery.sentMessageCount
+    };
+  }
+
+  private assertSendBudget(delivery: DeliveryContext, phase: DeliveryPhase, textLength: number): void {
+    if (this.isSendBudgetExempt(delivery, phase)) {
+      return;
+    }
+    const remaining = WECHAT_CONTEXT_MAX_SENDS - delivery.sentMessageCount;
+    const reserved = this.reservedSendSlotsForPhase(phase);
+    if (remaining > reserved) {
+      return;
+    }
+    if (!delivery.budgetStopLogged) {
+      delivery.budgetStopLogged = true;
+      void this.options.logger.warn("wechat send budget reached", {
+        ...this.deliveryLogMeta(delivery, phase),
+        textLength,
+        remainingSlots: remaining,
+        reservedTailSlots: reserved
+      });
+    }
+    throw new Error(WECHAT_CONTEXT_BUDGET_EXCEEDED);
+  }
+
+  private reservedSendSlotsForPhase(phase: DeliveryPhase): number {
+    switch (phase) {
+      case "completion":
+        return 0;
+      case "stream":
+      case "notice":
+        return 1;
+      case "fallback":
+      case "media-fallback":
+        return 0;
+    }
+  }
+
+  private isSendBudgetExempt(delivery: DeliveryContext, phase: DeliveryPhase): boolean {
+    return phase === "notice" && delivery.messageId === "welcome";
+  }
+
+  private noteSuccessfulSend(delivery: DeliveryContext): void {
+    delivery.sentMessageCount += 1;
+  }
+
+  private async sendChunkSequenceWithContinuation(
+    delivery: DeliveryContext,
+    chunks: string[],
+    phase: DeliveryPhase,
+    sourceMessageId: string,
+    completionNoticeText?: string
+  ): Promise<boolean> {
+    const originalChunkCount = chunks.length;
+    let remainingChunks = chunks.slice();
+    while (remainingChunks.length > 0) {
+      const remainingSlots = WECHAT_CONTEXT_MAX_SENDS - delivery.sentMessageCount;
+      const completionReserve = completionNoticeText ? 1 : 0;
+      if (remainingChunks.length <= remainingSlots - completionReserve) {
+        const sendResult = await this.trySendChunkBatch(delivery, remainingChunks, phase);
+        if (sendResult === true) {
+          this.clearPendingContinuation(delivery.userId);
+          if (completionNoticeText) {
+            try {
+              await this.sendText(delivery, completionNoticeText, "completion");
+            } catch (error) {
+              await this.options.logger.warn("failed to send continuation completion notice", {
+                userId: delivery.userId,
+                messageId: delivery.messageId,
+                sourceMessageId,
+                error: describeError(error)
+              });
+            }
+          }
+          await this.options.logger.info("continuation delivery completed", {
+            userId: delivery.userId,
+            messageId: delivery.messageId,
+            sourceMessageId,
+            deliveredChunkCount: originalChunkCount
+          });
+          return true;
+        }
+        this.setPendingContinuation(delivery.userId, sourceMessageId, sendResult.pendingChunks);
+        await this.options.logger.info("queued reply continuation", {
+          userId: delivery.userId,
+          messageId: delivery.messageId,
+          sourceMessageId,
+          pendingChunkCount: sendResult.pendingChunks.length
+        });
+        return false;
+      }
+
+      const contentSlots = Math.max(remainingSlots - 1, 0);
+      const sendNow = contentSlots > 0 ? remainingChunks.slice(0, contentSlots) : [];
+      const leftoverAfterPrompt = remainingChunks.slice(sendNow.length);
+      const sendResult = await this.trySendChunkBatch(delivery, sendNow, phase);
+      if (sendResult !== true) {
+        this.setPendingContinuation(delivery.userId, sourceMessageId, sendResult.pendingChunks.concat(leftoverAfterPrompt));
+        await this.options.logger.info("queued reply continuation", {
+          userId: delivery.userId,
+          messageId: delivery.messageId,
+          sourceMessageId,
+          pendingChunkCount: sendResult.pendingChunks.length + leftoverAfterPrompt.length
+        });
+        return false;
+      }
+      this.setPendingContinuation(delivery.userId, sourceMessageId, leftoverAfterPrompt);
+      await this.options.logger.info("queued reply continuation", {
+        userId: delivery.userId,
+        messageId: delivery.messageId,
+        sourceMessageId,
+        pendingChunkCount: leftoverAfterPrompt.length
+      });
+      await this.trySendContinuationPrompt(delivery);
+      return false;
+    }
+    this.clearPendingContinuation(delivery.userId);
+    return true;
+  }
+
+  private async trySendChunkBatch(
+    delivery: DeliveryContext,
+    chunks: string[],
+    phase: DeliveryPhase
+  ): Promise<true | { pendingChunks: string[] }> {
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index]!;
+      try {
+        await this.sendText(delivery, chunk, phase);
+      } catch (error) {
+        const errorText = describeError(error);
+        if (isRecoverableContinuationFailure(errorText)) {
+          return { pendingChunks: chunks.slice(index) };
+        }
+        throw error;
+      }
+    }
+    return true;
+  }
+
+  private async trySendContinuationPrompt(delivery: DeliveryContext): Promise<void> {
+    try {
+      await this.sendText(delivery, CONTINUATION_PROMPT_MESSAGE, "fallback");
+    } catch (error) {
+      await this.options.logger.warn("failed to send continuation prompt", {
+        ...this.deliveryLogMeta(delivery, "fallback"),
+        error: describeError(error)
+      });
+    }
+  }
+
+  private async tryHandleContinuationShortcut(message: InboundWechatMessage, contextToken: string): Promise<boolean> {
+    if (!this.isPureContinueRequest(message)) {
+      return false;
+    }
+    const hadPendingContinuation = this.pendingContinuations.has(message.userId);
+    const continuation = this.getPendingContinuation(message.userId);
+    if (!continuation) {
+      if (hadPendingContinuation) {
+        const delivery: DeliveryContext = {
+          userId: message.userId,
+          contextToken,
+          messageId: message.id,
+          startedAt: Date.now(),
+          degraded: false,
+          sentMessageCount: 0,
+          budgetStopLogged: false
+        };
+        await this.sendTextReliably(delivery, CONTINUATION_EXPIRED_MESSAGE, "fallback");
+        return true;
+      }
+      return false;
+    }
+    const routerStatus = await this.currentRouterStatus();
+    if (routerStatus?.state === "awaiting_approval") {
+      return false;
+    }
+    const delivery: DeliveryContext = {
+      userId: message.userId,
+      contextToken,
+      messageId: message.id,
+      startedAt: Date.now(),
+      degraded: false,
+      sentMessageCount: 0,
+      budgetStopLogged: false
+    };
+    await this.options.logger.info("received continuation shortcut", {
+      userId: message.userId,
+      messageId: message.id,
+      sourceMessageId: continuation.sourceMessageId,
+      remainingChunkCount: continuation.pendingChunks.length
+    });
+    const completed = await this.sendChunkSequenceWithContinuation(
+      delivery,
+      continuation.pendingChunks,
+      "fallback",
+      continuation.sourceMessageId,
+      "Codex 已完成。"
+    );
+    if (!completed) {
+      return true;
+    }
+    return true;
+  }
+
+  private async currentRouterStatus(): Promise<{ state: string } | null> {
+    const router = this.options.router as SessionRouter & {
+      codexStatus?: () => Promise<{ state: string }>;
+    };
+    if (typeof router.codexStatus !== "function") {
+      return null;
+    }
+    return await router.codexStatus();
+  }
+
+  private isPureContinueRequest(message: InboundWechatMessage): boolean {
+    return message.content.trim() === "1"
+      && (message.images?.length ?? 0) === 0
+      && (message.files?.length ?? 0) === 0;
+  }
+
+  private hasPendingContinuation(userId: string): boolean {
+    return this.getPendingContinuation(userId) !== null;
+  }
+
+  private getPendingContinuation(userId: string): PendingContinuationState | null {
+    const continuation = this.pendingContinuations.get(userId);
+    if (!continuation) {
+      return null;
+    }
+    if (Date.now() - continuation.updatedAt > CONTINUATION_STATE_TTL_MS) {
+      this.pendingContinuations.delete(userId);
+      return null;
+    }
+    return continuation;
+  }
+
+  private setPendingContinuation(userId: string, sourceMessageId: string, pendingChunks: string[]): void {
+    if (pendingChunks.length === 0) {
+      this.pendingContinuations.delete(userId);
+      return;
+    }
+    const now = Date.now();
+    const existing = this.pendingContinuations.get(userId);
+    this.pendingContinuations.set(userId, {
+      sourceMessageId,
+      pendingChunks,
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: now
+    });
+  }
+
+  private clearPendingContinuation(userId: string): void {
+    this.pendingContinuations.delete(userId);
   }
 
   private async enqueueOutbound(userId: string, send: () => Promise<void>): Promise<void> {
@@ -329,6 +824,19 @@ export class WechatBridgeRunner {
     } finally {
       if (this.outboundQueues.get(userId) === next) {
         this.outboundQueues.delete(userId);
+      }
+    }
+  }
+
+  private async enqueueInbound(userId: string, work: () => Promise<void>): Promise<void> {
+    const previous = this.inboundQueues.get(userId) ?? Promise.resolve();
+    const next = previous.catch(() => undefined).then(work);
+    this.inboundQueues.set(userId, next);
+    try {
+      await next;
+    } finally {
+      if (this.inboundQueues.get(userId) === next) {
+        this.inboundQueues.delete(userId);
       }
     }
   }
@@ -410,6 +918,15 @@ export class WechatBridgeRunner {
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function shortHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex").slice(0, 12);
+}
+
+function isRecoverableContinuationFailure(errorText: string): boolean {
+  const normalized = errorText.toLowerCase();
+  return normalized.includes("ret=-2") || normalized.includes(WECHAT_CONTEXT_BUDGET_EXCEEDED);
 }
 
 class WechatTokenExpiredError extends Error {}

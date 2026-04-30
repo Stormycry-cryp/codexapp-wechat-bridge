@@ -1,4 +1,4 @@
-import type { CodexApprovalRequest, CodexBridgeClient, CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage, CodexTurnOptions } from "./codex/app-server-client.js";
+import type { CodexApprovalRequest, CodexBridgeClient, CodexBridgeStatus, CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage, CodexTurnOptions } from "./codex/app-server-client.js";
 import type { ProjectDiscoveryConfig } from "./config.js";
 import { ProjectRegistry, formatProjectLine, type BridgeProject } from "./projects.js";
 import type { BridgeStore } from "./storage.js";
@@ -79,6 +79,11 @@ export class SessionRouter {
 
   shutdown(): void {
     this.codex.shutdown?.();
+  }
+
+  async codexStatus(): Promise<CodexBridgeStatus> {
+    const codex = await this.ensureCodexForActiveProject();
+    return codex.status();
   }
 
   async handleText(text: string, hooks: SessionRouterHooks = {}): Promise<string> {

@@ -1,6 +1,7 @@
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import {
   CodexAppServerClient,
@@ -20,6 +21,84 @@ describe("CodexAppServerClient helpers", () => {
     };
 
     expect(client.turnIdleTimeoutMs()).toBeGreaterThanOrEqual(24 * 60 * 60 * 1000);
+  });
+
+  it("does not miss a turn completion notification that arrives before the turn/start response", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-fast-turn-"));
+    const script = `
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const msg = JSON.parse(line);
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + "\\n");
+          return;
+        }
+        if (msg.method === "turn/start") {
+          process.stdout.write(JSON.stringify({ method: "item/agentMessage/delta", params: { delta: "fast reply" } }) + "\\n");
+          process.stdout.write(JSON.stringify({ method: "turn/completed", params: {} }) + "\\n");
+          setTimeout(() => {
+            process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: "turn-fast" } } }) + "\\n");
+          }, 5);
+        }
+      });
+    `;
+    const client = new CodexAppServerClient({
+      cwd: dir,
+      command: process.execPath,
+      args: ["-e", script],
+      desktopRefresh: false,
+      turnIdleTimeoutMs: 500
+    });
+
+    try {
+      await expect(client.sendTurn("thread-fast", "hello")).resolves.toBe("fast reply");
+    } finally {
+      client.shutdown();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports an intentional shutdown instead of an unexpected app-server disconnect", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-shutdown-turn-"));
+    const script = `
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const msg = JSON.parse(line);
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + "\\n");
+          return;
+        }
+        if (msg.method === "turn/start") {
+          process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: "turn-hang" } } }) + "\\n");
+        }
+      });
+    `;
+    const client = new CodexAppServerClient({
+      cwd: dir,
+      command: process.execPath,
+      args: ["-e", script],
+      desktopRefresh: false,
+      turnIdleTimeoutMs: 5_000
+    });
+
+    try {
+      const turnPromise = client.sendTurn("thread-shutdown", "hello");
+      const rejectedMessage = turnPromise.then(
+        () => "__resolved__",
+        (error) => error instanceof Error ? error.message : String(error)
+      );
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (client.status().activeTurnId === "turn-hang") break;
+        await delay(10);
+      }
+      client.shutdown();
+      await expect(rejectedMessage).resolves.toBe("Codex app-server stopped because the bridge is shutting down.");
+    } finally {
+      client.shutdown();
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 
   it("starts and resumes threads with full filesystem access by default", () => {
