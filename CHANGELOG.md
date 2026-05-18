@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.11 - 2026-05-19
+
+- Added active Codex project/thread index refresh:
+  - New CLI command: `codex-wechat-bridge refresh [--data-dir DIR] [--cwd DIR]`.
+  - New WeChat commands: `/refresh`, `刷新`, `刷新项目`, and `刷新线程`.
+  - Reads local Codex `~/.codex/state_5.sqlite` thread rows and `~/.codex/codex-global-state.json` workspace roots.
+  - Updates bridge `projects.json` and per-project active thread mappings in `bridge-state.json`, with backups before writes.
 - Improved streamed reply cohesion:
   - Avoids sending tiny paragraph fragments as standalone WeChat bubbles when the surrounding thought has not arrived yet.
   - Keeps numbered list items together instead of splitting at `1.` / `2.` list markers.

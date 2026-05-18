@@ -4,7 +4,7 @@
 
 Slim local bridge for personal WeChat iLink messages to `codex app-server`.
 
-Current release: `0.2.10`
+Current release: `0.2.11`
 
 ## What It Does
 
