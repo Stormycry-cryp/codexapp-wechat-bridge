@@ -66,6 +66,7 @@ export interface CodexBridgeClient {
   approvePending?(): Promise<string>;
   denyPending?(): Promise<string>;
   stop(): Promise<string>;
+  notifyTaskError?(message: string, code?: string): void;
   shutdown?(): void;
 }
 
@@ -76,6 +77,8 @@ export type CodexAppServerClientOptions = {
   turnIdleTimeoutMs?: number;
   desktopRefresh?: boolean;
 };
+
+export const CODEX_NO_TEXT_OUTPUT_MESSAGE = "Codex 已完成，本轮没有额外文本输出。";
 
 export class CodexAppServerClient implements CodexBridgeClient {
   private static readonly INTENTIONAL_SHUTDOWN_MESSAGE = "Codex app-server stopped because the bridge is shutting down.";
@@ -256,7 +259,7 @@ export class CodexAppServerClient implements CodexBridgeClient {
       return;
     }
     if (method === "turn/completed") {
-      const reply = this.activeReply.trim() || "(Codex completed without text output.)";
+      const reply = this.activeReply.trim() || CODEX_NO_TEXT_OUTPUT_MESSAGE;
       this.finishTurn(reply);
       return;
     }
@@ -283,6 +286,11 @@ export class CodexAppServerClient implements CodexBridgeClient {
     if (method.includes("approval")) {
       this.currentStatus = { state: "awaiting_approval", activeThreadId: this.activeThreadId, activeTurnId: this.activeTurnId };
     }
+  }
+
+  notifyTaskError(message: string, code?: string): void {
+    const details = code ? `${message} (${code})` : message;
+    this.finishTurn(new Error(details));
   }
 
   private handleServerRequest(id: number | string, method: string, params: unknown): void {

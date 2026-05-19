@@ -5,6 +5,7 @@ import { BridgeStore } from "./storage.js";
 export type ProjectDiscoveryConfig = {
   codexHistory?: boolean;
   codexSessionsDir?: string;
+  codexDesktopGlobalStatePath?: string;
   discoveryRoots?: string[];
   discoveryMaxDepth?: number;
 };
@@ -77,6 +78,9 @@ function normalizeProjectDiscovery(config: ProjectDiscoveryConfig | undefined): 
   return {
     codexHistory: config?.codexHistory ?? true,
     codexSessionsDir: config?.codexSessionsDir ? resolve(config.codexSessionsDir) : undefined,
+    codexDesktopGlobalStatePath: config?.codexDesktopGlobalStatePath
+      ? resolve(config.codexDesktopGlobalStatePath)
+      : undefined,
     discoveryRoots: (config?.discoveryRoots ?? []).map((root) => resolve(root)),
     discoveryMaxDepth: Math.max(1, config?.discoveryMaxDepth ?? 3)
   };

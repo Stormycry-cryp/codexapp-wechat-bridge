@@ -419,6 +419,33 @@ describe("SessionRouter", () => {
     expect(codex.sendTurn).not.toHaveBeenCalled();
   });
 
+  it("refreshes projects and thread mappings with Chinese aliases", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-router-"));
+    try {
+      const store = new BridgeStore(dir);
+      const workspace = join(dir, "bridge");
+      await mkdir(workspace, { recursive: true });
+      const codex = fakeCodex("idle");
+      const router = new SessionRouter(codex, store, {
+        workspace,
+        refreshThreadRows: [],
+        refreshGlobalStatePath: join(dir, "missing-codex-global-state.json")
+      });
+
+      await expect(router.handleText("刷新项目")).resolves.toContain("已刷新 Codex 项目/线程索引");
+      await expect(store.readJson("projects.json")).resolves.toEqual({
+        projects: [
+          { key: "bridge", path: workspace }
+        ]
+      });
+
+      await expect(router.handleText("/刷新线程")).resolves.toContain("项目数：1");
+      expect(codex.sendTurn).not.toHaveBeenCalled();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("refuses project switching while codex is busy", async () => {
     const dir = await mkdtemp(join(tmpdir(), "cwb-router-"));
     try {

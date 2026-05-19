@@ -23,7 +23,7 @@
 - Run `npm test` for the Vitest suite.
 - Run `npm run typecheck` for TypeScript checking without emitting.
 - Run `npm run build` before restarting a LaunchAgent-managed bridge.
-- Restart the local LaunchAgent with `launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"` after rebuilding `dist`.
+- After changing this bridge and successfully rebuilding `dist`, automatically restart the local LaunchAgent with `launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"` unless the user explicitly asks not to.
 
 ## Streaming Notes
 - Progress streaming sends natural paragraph/sentence chunks and keeps fenced code blocks together.

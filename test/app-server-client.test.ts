@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
 import {
+  CODEX_NO_TEXT_OUTPUT_MESSAGE,
   CodexAppServerClient,
   buildTurnInput,
   buildThreadResumeParams,
@@ -53,6 +54,84 @@ describe("CodexAppServerClient helpers", () => {
 
     try {
       await expect(client.sendTurn("thread-fast", "hello")).resolves.toBe("fast reply");
+    } finally {
+      client.shutdown();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("uses a user-facing Chinese message when a turn completes without text output", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-empty-turn-"));
+    const script = `
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const msg = JSON.parse(line);
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + "\\n");
+          return;
+        }
+        if (msg.method === "turn/start") {
+          process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: "turn-empty" } } }) + "\\n");
+          process.stdout.write(JSON.stringify({ method: "turn/completed", params: {} }) + "\\n");
+        }
+      });
+    `;
+    const client = new CodexAppServerClient({
+      cwd: dir,
+      command: process.execPath,
+      args: ["-e", script],
+      desktopRefresh: false,
+      turnIdleTimeoutMs: 500
+    });
+
+    try {
+      await expect(client.sendTurn("thread-empty", "hello")).resolves.toBe(CODEX_NO_TEXT_OUTPUT_MESSAGE);
+    } finally {
+      client.shutdown();
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails the active turn when the session reports a task-level overload error", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-overload-turn-"));
+    const script = `
+      const readline = require("node:readline");
+      const rl = readline.createInterface({ input: process.stdin });
+      rl.on("line", (line) => {
+        const msg = JSON.parse(line);
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ id: msg.id, result: {} }) + "\\n");
+          return;
+        }
+        if (msg.method === "turn/start") {
+          process.stdout.write(JSON.stringify({ id: msg.id, result: { turn: { id: "turn-overload" } } }) + "\\n");
+          setTimeout(() => {
+            process.stdout.write(JSON.stringify({ method: "turn/completed", params: {} }) + "\\n");
+          }, 50);
+        }
+      });
+    `;
+    const client = new CodexAppServerClient({
+      cwd: dir,
+      command: process.execPath,
+      args: ["-e", script],
+      desktopRefresh: false,
+      turnIdleTimeoutMs: 2_000
+    });
+
+    try {
+      const turnPromise = client.sendTurn("thread-overload", "hello");
+      const rejectionText = turnPromise.then(
+        () => "__resolved__",
+        (error) => error instanceof Error ? error.message : String(error)
+      );
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (client.status().activeTurnId === "turn-overload") break;
+        await delay(10);
+      }
+      client.notifyTaskError("Selected model is at capacity. Please try a different model.", "server_overloaded");
+      await expect(rejectionText).resolves.toBe("Selected model is at capacity. Please try a different model. (server_overloaded)");
     } finally {
       client.shutdown();
       await rm(dir, { recursive: true, force: true });

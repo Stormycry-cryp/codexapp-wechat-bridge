@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { extname } from "node:path";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import type { CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage } from "../codex/app-server-client.js";
+import { CODEX_NO_TEXT_OUTPUT_MESSAGE, type CodexFileOutput, type CodexImageOutput, type CodexInputFile, type CodexInputImage } from "../codex/app-server-client.js";
 import type { BridgeConfig, WechatAccount } from "../config.js";
 import { saveConfig } from "../config.js";
 import type { Logger } from "../logger.js";
@@ -276,12 +276,17 @@ export class WechatBridgeRunner {
     }
     if (progress.hasStreamedOutput()) {
       await progress.sendNotice("Codex 已完成。");
-    } else if (reply && !sentIncompleteFallback && !(deliveredNativeOutput && reply === "(Codex completed without text output.)")) {
+    } else if (reply && !sentIncompleteFallback && !(deliveredNativeOutput && reply === CODEX_NO_TEXT_OUTPUT_MESSAGE)) {
       const completed = await this.sendTextWithContinuation(delivery, reply, "fallback");
       if (!completed) {
         return;
       }
     }
+  }
+
+  async handleCodexTaskError(message: string, code?: string): Promise<void> {
+    await this.options.logger.warn("codex task error surfaced from session", { message, code });
+    await this.options.router.notifyCodexTaskError(message, code);
   }
 
   private createProgressSender(userId: string, contextToken: string, delivery?: DeliveryContext, phase: DeliveryPhase = "stream"): ProgressSender {

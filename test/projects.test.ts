@@ -27,7 +27,8 @@ describe("ProjectRegistry", () => {
 
       const registry = new ProjectRegistry(store, manualPath, {
         codexHistory: true,
-        codexSessionsDir: sessionsDir
+        codexSessionsDir: sessionsDir,
+        codexDesktopGlobalStatePath: join(dir, "missing-codex-global-state.json")
       });
 
       await expect(registry.list()).resolves.toEqual([
@@ -58,7 +59,8 @@ describe("ProjectRegistry", () => {
 
       const registry = new ProjectRegistry(store, workspace, {
         discoveryRoots: [rootsDir],
-        discoveryMaxDepth: 3
+        discoveryMaxDepth: 3,
+        codexDesktopGlobalStatePath: join(dir, "missing-codex-global-state.json")
       });
 
       const projects = await registry.list();
@@ -67,6 +69,35 @@ describe("ProjectRegistry", () => {
         { key: "Alpha-App", path: alpha },
         { key: "Alpha-App-2", path: alphaNested },
         { key: "Beta", path: beta }
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("discovers projects from Codex desktop global state workspace roots", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-projects-"));
+    try {
+      const store = new BridgeStore(dir);
+      const workspace = join(dir, "workspace");
+      const desktopProject = join(dir, "desktop-project");
+      const globalStatePath = join(dir, "codex-global-state.json");
+      await mkdir(workspace, { recursive: true });
+      await mkdir(desktopProject, { recursive: true });
+      await writeFile(join(desktopProject, "package.json"), "{}\n");
+      await writeFile(globalStatePath, JSON.stringify({
+        "active-workspace-roots": [desktopProject],
+        "electron-saved-workspace-roots": [desktopProject],
+        "project-order": [desktopProject]
+      }, null, 2));
+
+      const registry = new ProjectRegistry(store, workspace, {
+        codexDesktopGlobalStatePath: globalStatePath
+      });
+
+      await expect(registry.list()).resolves.toEqual([
+        { key: "workspace", path: workspace },
+        { key: "desktop-project", path: desktopProject }
       ]);
     } finally {
       await rm(dir, { recursive: true, force: true });

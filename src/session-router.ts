@@ -1,6 +1,7 @@
 import type { CodexApprovalRequest, CodexBridgeClient, CodexBridgeStatus, CodexFileOutput, CodexImageOutput, CodexInputFile, CodexInputImage, CodexTurnOptions } from "./codex/app-server-client.js";
 import type { ProjectDiscoveryConfig } from "./config.js";
 import { ProjectRegistry, formatProjectLine, type BridgeProject } from "./projects.js";
+import { refreshProjectThreadIndex, type CodexThreadIndexRow } from "./refresh.js";
 import type { BridgeStore } from "./storage.js";
 
 type BridgeState = {
@@ -19,6 +20,7 @@ const RESUME_COMMANDS = ["/resume", "切线程", "/切线程", "恢复线程", "
 const STEER_COMMANDS = ["/steer", "引导", "/引导"];
 const NEW_THREAD_COMMANDS = new Set(["/new", "新线程", "/新线程"]);
 const STOP_COMMANDS = new Set(["/stop", "停下", "/停下", "停止", "/停止"]);
+const REFRESH_COMMANDS = new Set(["/refresh", "刷新", "/刷新", "刷新项目", "/刷新项目", "刷新线程", "/刷新线程"]);
 
 export function helpMessage(): string {
   return [
@@ -30,6 +32,7 @@ export function helpMessage(): string {
     "- /resume <序号|thread_id>、线程 <序号|thread_id>：切换线程",
     "- /projects、/project、项目列表：查看项目，随后可直接回复数字切换",
     "- /project <序号|key>、项目 <序号|key>：切换项目",
+    "- /refresh、刷新项目、刷新线程：主动同步 Codex 项目和线程索引",
     "- /status：查看 bridge、项目和线程状态",
     "- /steer <内容>、引导 <内容>：给当前 busy 中的任务追加引导",
     "- /approve、/deny：处理待审批请求",
@@ -54,6 +57,9 @@ export type SessionRouterOptions = {
   workspace?: string;
   codexFactory?: (project: BridgeProject) => CodexBridgeClient;
   projectDiscovery?: ProjectDiscoveryConfig;
+  refreshStateDbPath?: string;
+  refreshGlobalStatePath?: string;
+  refreshThreadRows?: CodexThreadIndexRow[];
 };
 
 export type SessionRouterInput = {
@@ -67,6 +73,9 @@ export class SessionRouter {
   private readonly workspace: string;
   private readonly codexFactory?: (project: BridgeProject) => CodexBridgeClient;
   private readonly projectDiscovery?: ProjectDiscoveryConfig;
+  private readonly refreshStateDbPath?: string;
+  private readonly refreshGlobalStatePath?: string;
+  private readonly refreshThreadRows?: CodexThreadIndexRow[];
   private activeProjectKey = "";
   private recentListContext?: BridgeState["recentListContext"];
 
@@ -75,6 +84,9 @@ export class SessionRouter {
     this.workspace = options.workspace ?? process.cwd();
     this.codexFactory = options.codexFactory;
     this.projectDiscovery = options.projectDiscovery;
+    this.refreshStateDbPath = options.refreshStateDbPath;
+    this.refreshGlobalStatePath = options.refreshGlobalStatePath;
+    this.refreshThreadRows = options.refreshThreadRows;
   }
 
   shutdown(): void {
@@ -84,6 +96,13 @@ export class SessionRouter {
   async codexStatus(): Promise<CodexBridgeStatus> {
     const codex = await this.ensureCodexForActiveProject();
     return codex.status();
+  }
+
+  async notifyCodexTaskError(message: string, code?: string): Promise<void> {
+    const codex = await this.ensureCodexForActiveProject();
+    if (typeof codex.notifyTaskError === "function") {
+      codex.notifyTaskError(message, code);
+    }
   }
 
   async handleText(text: string, hooks: SessionRouterHooks = {}): Promise<string> {
@@ -109,6 +128,10 @@ export class SessionRouter {
 
     if (trimmed === "/help") {
       return helpMessage();
+    }
+
+    if (REFRESH_COMMANDS.has(trimmed)) {
+      return await this.handleRefreshCommand();
     }
 
     if (trimmed === "/approve") {
@@ -251,6 +274,30 @@ export class SessionRouter {
       return "This Codex client does not support steer.";
     }
     return await codex.steerTurn(status.activeThreadId, status.activeTurnId, guidance);
+  }
+
+  private async handleRefreshCommand(): Promise<string> {
+    if (!this.store) return "Refresh is unavailable without bridge storage.";
+    const codex = await this.ensureCodexForActiveProject();
+    const status = codex.status();
+    if (status.state === "busy" || status.state === "awaiting_approval") {
+      return "Codex is busy. Send /stop to interrupt, or wait and refresh later.";
+    }
+    const result = await refreshProjectThreadIndex({
+      store: this.store,
+      workspace: this.workspace,
+      stateDbPath: this.refreshStateDbPath,
+      globalStatePath: this.refreshGlobalStatePath,
+      threadRows: this.refreshThreadRows
+    });
+    this.activeProjectKey = "";
+    return [
+      "已刷新 Codex 项目/线程索引。",
+      `项目数：${result.projectCount}`,
+      `线程映射：${result.mappedThreadCount}`,
+      `当前项目：${result.activeProjectKey || "(none)"}`,
+      "发送 /项目 查看项目列表，发送 /线程 查看当前项目线程。"
+    ].join("\n");
   }
 
   private async resolveThreadTarget(target: string): Promise<string> {

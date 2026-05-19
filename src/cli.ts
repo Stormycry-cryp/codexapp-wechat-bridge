@@ -9,6 +9,7 @@ import { Logger } from "./logger.js";
 import { WechatBridgeRunner } from "./wechat/transport.js";
 import { ProjectRegistry, formatProjectLine } from "./projects.js";
 import { acquireProcessLock } from "./process-lock.js";
+import { refreshProjectThreadIndex } from "./refresh.js";
 
 type CliOptions = {
   dataDir: string;
@@ -37,6 +38,10 @@ async function main(): Promise<void> {
   }
   if (command === "project") {
     await projectCommand(store, options, rest);
+    return;
+  }
+  if (command === "refresh") {
+    await refreshCommand(store, options);
     return;
   }
   if (command === "help" || command === "--help" || command === "-h") {
@@ -165,6 +170,21 @@ async function projectCommand(store: BridgeStore, options: CliOptions, args: str
   throw new Error(`Unknown project command: ${subcommand}`);
 }
 
+async function refreshCommand(store: BridgeStore, options: CliOptions): Promise<void> {
+  const config = await loadConfig(store, options.cwd);
+  const result = await refreshProjectThreadIndex({
+    store,
+    workspace: config.workspace
+  });
+  console.log([
+    "Codex project/thread index refreshed.",
+    `Projects: ${result.projectCount}`,
+    `Thread mappings: ${result.mappedThreadCount}`,
+    `Active project: ${result.activeProjectKey || "(none)"}`,
+    result.backupStamp ? `Backup stamp: ${result.backupStamp}` : ""
+  ].filter(Boolean).join("\n"));
+}
+
 function parseOptions(args: string[]): CliOptions {
   const options: CliOptions = {
     dataDir: process.env.CODEX_WECHAT_BRIDGE_DATA_DIR || defaultDataDir(),
@@ -215,6 +235,7 @@ Usage:
   codex-wechat-bridge setup [--data-dir DIR] [--cwd DIR] [--api-url URL] [--owner USER_ID]
   codex-wechat-bridge run [--data-dir DIR] [--cwd DIR]
   codex-wechat-bridge status [--data-dir DIR] [--cwd DIR]
+  codex-wechat-bridge refresh [--data-dir DIR] [--cwd DIR]
   codex-wechat-bridge project list [--data-dir DIR] [--cwd DIR]
   codex-wechat-bridge project add <key> <path> [--data-dir DIR]
 `);

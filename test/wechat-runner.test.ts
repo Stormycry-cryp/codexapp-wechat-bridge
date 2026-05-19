@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defaultConfig } from "../src/config.js";
 import { BridgeStore } from "../src/storage.js";
+import { CODEX_NO_TEXT_OUTPUT_MESSAGE } from "../src/codex/app-server-client.js";
 import { encryptWechatCdnPayload } from "../src/wechat/media.js";
 import { ProgressSender } from "../src/wechat/progress-sender.js";
 import { WechatBridgeRunner } from "../src/wechat/transport.js";
@@ -134,7 +135,8 @@ describe("WechatBridgeRunner onboarding", () => {
         account: { token: "token" },
         store,
         router: router as never,
-        logger: fakeLogger()
+        logger: fakeLogger(),
+        reliableSendIntervalMs: 0
       });
       const handleMessage = (runner as unknown as {
         handleMessage(message: {
@@ -205,10 +207,11 @@ describe("WechatBridgeRunner onboarding", () => {
         router: {
           handleInput: vi.fn(async (_input, hooks?: { onFileOutput?: (output: { path: string }) => Promise<void> }) => {
             await hooks?.onFileOutput?.({ path: artifactPath, fallbackText: `文件已生成: ${artifactPath}` });
-            return "(Codex completed without text output.)";
+            return CODEX_NO_TEXT_OUTPUT_MESSAGE;
           })
         } as never,
-        logger: fakeLogger()
+        logger: fakeLogger(),
+        reliableSendIntervalMs: 0
       });
       const handleMessage = (runner as unknown as {
         handleMessage(message: { id: string; userId: string; content: string; contextToken: string }): Promise<void>;
@@ -283,7 +286,7 @@ describe("WechatBridgeRunner onboarding", () => {
             hooks?.onDelta?.("第一段说明。");
             await hooks?.onFileOutput?.({ path: artifactPath, fallbackText: `文件已生成: ${artifactPath}` });
             hooks?.onDelta?.("第二段补充。");
-            return "(Codex completed without text output.)";
+            return CODEX_NO_TEXT_OUTPUT_MESSAGE;
           })
         } as never,
         logger: fakeLogger()
@@ -737,6 +740,49 @@ describe("WechatBridgeRunner onboarding", () => {
         "wechat send budget reached",
         expect.anything()
       );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("surfaces a task-level overload error instead of pretending the turn completed without text", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cwb-runner-"));
+    try {
+      const sentTexts: string[] = [];
+      vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+        if (url === "https://ilinkai.weixin.qq.com/ilink/bot/sendmessage") {
+          const body = JSON.parse(String(init?.body));
+          sentTexts.push(body.msg.item_list[0].text_item.text);
+          return new Response(JSON.stringify({ ret: 0 }));
+        }
+        throw new Error(`unexpected url: ${url} ${String(init?.method ?? "GET")}`);
+      }));
+
+      const router = {
+        handleInput: vi.fn(async () => {
+          throw new Error("Selected model is at capacity. Please try a different model. (server_overloaded)");
+        })
+      };
+      const store = new BridgeStore(dir);
+      await store.writeJson("welcome-state.json", { version: 2, sentTo: { "user@im.wechat": 2 } });
+      const runner = new WechatBridgeRunner({
+        config: { ...defaultConfig("/work"), ownerUserId: "user@im.wechat", longPollTimeoutMs: 10 },
+        account: { token: "token" },
+        store,
+        router: router as never,
+        logger: fakeLogger(),
+        reliableSendIntervalMs: 0
+      });
+      const handleMessage = (runner as unknown as {
+        handleMessage(message: { id: string; userId: string; content: string; contextToken: string }): Promise<void>;
+      }).handleMessage.bind(runner);
+
+      await handleMessage({ id: "overload-1", userId: "user@im.wechat", content: "具体怎么脏？能怎么清理？", contextToken: "ctx-a" });
+
+      expect(sentTexts.join("\n")).toContain("Bridge error: Selected model is at capacity.");
+      expect(sentTexts.join("\n")).toContain("Please try a different model.");
+      expect(sentTexts.join("\n")).toContain("(server_overloaded)");
+      expect(sentTexts).not.toContain(CODEX_NO_TEXT_OUTPUT_MESSAGE);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

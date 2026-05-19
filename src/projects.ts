@@ -15,6 +15,12 @@ type ProjectsFile = {
   projects?: BridgeProject[];
 };
 
+type CodexDesktopGlobalState = {
+  "active-workspace-roots"?: unknown;
+  "electron-saved-workspace-roots"?: unknown;
+  "project-order"?: unknown;
+};
+
 const PROJECT_MARKER_FILES = new Set(["package.json", "pyproject.toml", "Cargo.toml", "go.mod", "Gemfile", "pom.xml"]);
 const PROJECT_MARKER_DIR_SUFFIXES = [".xcodeproj", ".xcworkspace"];
 const IGNORED_SCAN_DIRS = new Set([".git", ".next", "node_modules", "dist", "build", "coverage"]);
@@ -78,11 +84,12 @@ export class ProjectRegistry {
   }
 
   private async discoverProjects(): Promise<BridgeProject[]> {
-    const [historyProjects, rootProjects] = await Promise.all([
+    const [historyProjects, desktopProjects, rootProjects] = await Promise.all([
       this.discoverFromCodexHistory(),
+      this.discoverFromCodexDesktopGlobalState(),
       this.discoverFromRoots()
     ]);
-    return [...historyProjects, ...rootProjects];
+    return [...historyProjects, ...desktopProjects, ...rootProjects];
   }
 
   private async discoverFromCodexHistory(): Promise<BridgeProject[]> {
@@ -122,6 +129,29 @@ export class ProjectRegistry {
       }
     }
     return projects.sort((left, right) => left.key.localeCompare(right.key) || left.path.localeCompare(right.path));
+  }
+
+  private async discoverFromCodexDesktopGlobalState(): Promise<BridgeProject[]> {
+    const globalStatePath = resolve(this.discovery.codexDesktopGlobalStatePath ?? join(homedir(), ".codex", "codex-global-state.json"));
+    if (!(await exists(globalStatePath))) return [];
+
+    let parsed: CodexDesktopGlobalState;
+    try {
+      parsed = JSON.parse(await readFile(globalStatePath, "utf8")) as CodexDesktopGlobalState;
+    } catch {
+      return [];
+    }
+
+    const candidateRoots = new Set<string>();
+    for (const root of extractDesktopWorkspaceRoots(parsed)) {
+      const projectPath = await findProjectRoot(resolve(root), 1);
+      if (projectPath) candidateRoots.add(projectPath);
+    }
+
+    return [...candidateRoots].sort().map((projectPath) => ({
+      key: keyFromPath(projectPath),
+      path: projectPath
+    }));
   }
 }
 
@@ -206,6 +236,19 @@ function extractCwds(line: string): string[] {
     }
   }
   return result;
+}
+
+function extractDesktopWorkspaceRoots(state: CodexDesktopGlobalState): string[] {
+  return [
+    ...toStringArray(state["active-workspace-roots"]),
+    ...toStringArray(state["electron-saved-workspace-roots"]),
+    ...toStringArray(state["project-order"])
+  ];
+}
+
+function toStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
 }
 
 async function collectFiles(root: string, predicate: (path: string) => boolean): Promise<string[]> {
