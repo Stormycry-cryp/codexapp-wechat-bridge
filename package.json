@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsx src/cli.ts"
+    "dev": "tsx src/cli.ts",
+    "service": "node scripts/service.mjs"
   },
   "dependencies": {},
   "devDependencies": {

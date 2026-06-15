@@ -77,13 +77,13 @@ npm run build
 
 构建产物会输出到 `dist/`。
 
-如果你是在 LaunchAgent 托管的环境里重建，构建后需要执行：
+如果你是在持久化服务托管的环境里重建，构建后需要执行：
 
 ```bash
-launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"
+npm run service -- restart
 ```
 
-这样正在运行的 agent 才会重新加载新的 `dist` 文件。
+这样正在运行的后台服务才会重新加载新的 `dist` 文件。
 
 这也是本地修复完成后的标准一行重启命令。
 
@@ -127,35 +127,46 @@ node dist/cli.js run --cwd /Users/you/path/to/default-project
 node dist/cli.js status
 ```
 
-在这台工作站里，bridge 设计为运行在用户级 LaunchAgent 下。LaunchAgent 应该指向 `dist/cli.js run`，并使用同一个数据目录。
+日常使用时，bridge 可以注册成登录后自动启动的用户级后台服务。服务会指向 `dist/cli.js run`，并使用同一个数据目录。
 
-## LaunchAgent 开机自启
+## 持久化后台服务
 
-在 macOS 上，把 `docs/launchagent.example.plist` 复制到：
+项目内自带跨平台服务脚本：
+
+```bash
+npm run service -- install --cwd /Users/you/path/to/default-project
+npm run service -- status
+npm run service -- restart
+npm run service -- stop
+npm run service -- uninstall
+```
+
+macOS 会安装用户级 LaunchAgent：
 
 ```text
 ~/Library/LaunchAgents/com.codex.wechat-bridge.plist
 ```
 
-然后替换这些占位符：
+Windows 会安装登录启动的任务计划程序任务：
 
-- `__NODE_PATH__`：`which node` 的输出。
-- `__PROJECT_DIR__`：解压后的项目目录。
-- `__DATA_DIR__`：通常是 `/Users/<you>/.codex-wechat-bridge`。
-- `__WORKSPACE__`：默认工作区 / 项目路径。
-
-加载它：
-
-```bash
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.codex.wechat-bridge.plist
-launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"
+```text
+CodexWechatBridge
 ```
 
-检查状态：
+如果只是想查看脚本会执行什么，不真正注册服务：
 
 ```bash
-launchctl print "gui/$(id -u)/com.codex.wechat-bridge" | rg "state =|pid =|runs =|last exit code"
+npm run service -- install --cwd /Users/you/path/to/default-project --dry-run
 ```
+
+Windows PowerShell 示例：
+
+```powershell
+npm run service -- install --cwd C:\Users\you\workspace
+npm run service -- status
+```
+
+旧的手动 plist 模板仍保留在 `docs/launchagent.example.plist`，主要用于排查或手动部署。
 
 ## 项目注册表
 
@@ -290,6 +301,7 @@ npm run build
 常见源码入口：
 
 - `src/cli.ts`：setup / run / status / project CLI。
+- `src/service.ts`：macOS LaunchAgent / Windows Task Scheduler 服务命令生成。
 - `src/wechat/transport.ts`：长轮询 runner 与微信消息处理。
 - `src/wechat/ilink-api.ts`：iLink HTTP 客户端与 CDN 媒体上传 / 下载。
 - `src/session-router.ts`：命令解析、项目切换、线程路由。
@@ -318,7 +330,7 @@ npm run build
 6. 可选：运行 `node dist/cli.js project add <key> <path>` 添加手动快捷项目名。
 7. 先前台运行一次 bridge：`node dist/cli.js run --cwd /their/default/workspace`。
 8. 在微信里发送 `/status` 和 `/help` 做验证。
-9. 可选：安装 LaunchAgent 做后台和开机自启。
+9. 可选：运行 `npm run service -- install --cwd /their/default/workspace` 做后台和登录自启。
 
 不要把这些文件一起发给别人：
 

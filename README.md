@@ -77,9 +77,9 @@ npm run build
 
 The build output goes to `dist/`.
 
-If you rebuild a LaunchAgent-managed install, run `launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"` afterward so the running agent reloads the new `dist` files.
+If you rebuild a service-managed install, run `npm run service -- restart` afterward so the running service reloads the new `dist` files.
 
-The same `kickstart` command is the normal one-line restart after a local fix has been built.
+The same service restart command is the normal one-line restart after a local fix has been built.
 
 ## Setup
 
@@ -121,35 +121,46 @@ Check local config:
 node dist/cli.js status
 ```
 
-In this workstation, the bridge is designed to run under a user LaunchAgent. The LaunchAgent should point at `dist/cli.js run` and use the same data directory.
+For daily use, the bridge can run as a login-started user service. The service points at `dist/cli.js run` and uses the same data directory.
 
-## LaunchAgent Autostart
+## Persistent Service
 
-On macOS, copy `docs/launchagent.example.plist` to:
+The project includes a cross-platform service helper:
+
+```bash
+npm run service -- install --cwd /Users/you/path/to/default-project
+npm run service -- status
+npm run service -- restart
+npm run service -- stop
+npm run service -- uninstall
+```
+
+On macOS, it installs a user LaunchAgent:
 
 ```text
 ~/Library/LaunchAgents/com.codex.wechat-bridge.plist
 ```
 
-Then edit these placeholders:
+On Windows, it installs a login-started Task Scheduler task:
 
-- `__NODE_PATH__`: output of `which node`.
-- `__PROJECT_DIR__`: the unpacked project directory.
-- `__DATA_DIR__`: usually `/Users/<you>/.codex-wechat-bridge`.
-- `__WORKSPACE__`: default local workspace/project path.
-
-Load it:
-
-```bash
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.codex.wechat-bridge.plist
-launchctl kickstart -k "gui/$(id -u)/com.codex.wechat-bridge"
+```text
+CodexWechatBridge
 ```
 
-Check it:
+To preview the commands without registering anything:
 
 ```bash
-launchctl print "gui/$(id -u)/com.codex.wechat-bridge" | rg "state =|pid =|runs =|last exit code"
+npm run service -- install --cwd /Users/you/path/to/default-project --dry-run
 ```
+
+Windows PowerShell example:
+
+```powershell
+npm run service -- install --cwd C:\Users\you\workspace
+npm run service -- status
+```
+
+The old manual plist template remains in `docs/launchagent.example.plist` for troubleshooting and hand-managed deployments.
 
 ## Project Registry
 
@@ -284,6 +295,7 @@ npm run build
 Useful source entry points:
 
 - `src/cli.ts`: setup/run/status/project CLI.
+- `src/service.ts`: macOS LaunchAgent / Windows Task Scheduler service command generation.
 - `src/wechat/transport.ts`: long-poll runner and WeChat message handling.
 - `src/wechat/ilink-api.ts`: iLink HTTP client and CDN media upload/download.
 - `src/session-router.ts`: command parsing, project switching, thread routing.
@@ -312,7 +324,7 @@ Send them the source zip, not your runtime data. The recipient should:
 6. Optional: add manual shortcuts with `node dist/cli.js project add <key> <path>` for names you want to pin or override.
 7. Run the bridge in foreground once with `node dist/cli.js run --cwd /their/default/workspace`.
 8. Send `/status` and `/help` from WeChat to verify the bridge.
-9. Optional: install the LaunchAgent for background/autostart.
+9. Optional: run `npm run service -- install --cwd /their/default/workspace` for background login autostart.
 
 Do not include these files when handing it off:
 
