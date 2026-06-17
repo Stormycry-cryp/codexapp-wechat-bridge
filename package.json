@@ -2,6 +2,7 @@
   "name": "codex-wechat-bridge",
   "version": "0.2.11",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "bin": {
     "codex-wechat-bridge": "./dist/cli.js"
